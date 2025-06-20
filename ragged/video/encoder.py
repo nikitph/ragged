@@ -79,18 +79,61 @@ class VectorMP4Encoder:
         self.manifest["metadata"]["total_vectors"] += num_vectors
 
     def _build_faiss_index(self):
-        """Build Faiss index from all vectors"""
+        """Build Faiss IVFPQ index for better compression and speed"""
         if not self.all_vectors:
             return None
 
         vectors_array = np.array(self.all_vectors).astype(np.float32)
+        n_vectors = len(vectors_array)
 
-        # Normalize vectors for cosine similarity (using IndexFlatIP)
+        # Normalize vectors for cosine similarity
         faiss.normalize_L2(vectors_array)
 
-        # Create Faiss index
-        index = faiss.IndexFlatIP(self.vector_dim)  # Inner Product for normalized vectors = cosine similarity
-        index.add(vectors_array)
+        # Choose index type based on dataset size
+        if n_vectors < 10000:
+            # Small dataset: use flat index
+            print(f"Using IndexFlatIP for {n_vectors} vectors")
+            index = faiss.IndexFlatIP(self.vector_dim)
+            index.add(vectors_array)
+        else:
+            # Large dataset: use IVFPQ
+            # Calculate optimal parameters
+            nlist = min(int(4 * np.sqrt(n_vectors)), n_vectors // 10)  # Number of clusters
+            nlist = max(nlist, 1)  # At least 1 cluster
+
+            m = 8  # Number of subquantizers (must divide vector_dim)
+            while self.vector_dim % m != 0 and m > 1:
+                m -= 1
+
+            nbits = 8  # Bits per subquantizer
+
+            print(f"Using IndexIVFPQ for {n_vectors} vectors: nlist={nlist}, m={m}, nbits={nbits}")
+
+            # Create IVFPQ index
+            quantizer = faiss.IndexFlatIP(self.vector_dim)
+            index = faiss.IndexIVFPQ(quantizer, self.vector_dim, nlist, m, nbits)
+
+            # Train the index (required for IVFPQ)
+            print("Training IVFPQ index...")
+            index.train(vectors_array)
+
+            # Add vectors
+            index.add(vectors_array)
+
+            # Set search parameters for good recall
+            index.nprobe = min(nlist, 10)  # Number of clusters to search
+
+        # Update manifest with index info
+        if hasattr(index, 'nlist'):
+            self.manifest["metadata"]["faiss_index_type"] = "IndexIVFPQ"
+            self.manifest["metadata"]["faiss_params"] = {
+                "nlist": index.nlist,
+                "nprobe": index.nprobe,
+                "m": m if 'm' in locals() else None,
+                "nbits": nbits if 'nbits' in locals() else None
+            }
+        else:
+            self.manifest["metadata"]["faiss_index_type"] = "IndexFlatIP"
 
         return index
 

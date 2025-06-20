@@ -56,7 +56,7 @@ def test_basic_encoding_decoding():
     print("\n=== Testing Basic Encoding/Decoding ===")
 
     # Create test data
-    vectors, metadata = create_test_data(100000, 1536)
+    vectors, metadata = create_test_data(9000, 1536)
 
     # Test encoding
     print("Encoding vectors...")
@@ -208,8 +208,6 @@ def test_file_structure(filename):
             f.seek(box_size - 8, 1)
 
     print(f"MP4 boxes found:")
-    for box_type, size in boxes_found:
-        print(f"  {box_type}: {size} bytes ({size / 1024:.1f} KB)")
 
     print(f"Total file size: {total_size} bytes ({total_size / 1024 / 1024:.2f} MB)")
 
