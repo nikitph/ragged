@@ -1,520 +1,483 @@
 """
-Fixed and improved test suite for Ragged video encoding and decoding functionality
-Addresses issues found in the test run and provides more realistic testing
+Test suite for Text-Vector Pipeline and VectorMP4Encoder
+Updated to match the text processing functionality
 """
 
 import pytest
 import json
 import time
-import threading
-from pathlib import Path
 import tempfile
-import shutil
 import numpy as np
-from unittest.mock import Mock, patch, MagicMock
-import cv2
+from pathlib import Path
+from unittest.mock import Mock, patch
+import hashlib
 
-from ragged.video import VideoEncoder, VideoRetriever
-from ragged.video.utils import chunk_text, encode_to_qr, decode_qr, qr_to_frame
-from ragged.video.config import get_default_config
+# Import our text-vector pipeline components
+from ragged.video.encoder import TextVectorPipeline, VectorMP4Encoder, TextChunk, create_text_vector_mp4
 
 
-class TestVideoEncoderFixed:
-    """Fixed encoder testing with proper error handling"""
+class TestTextVectorPipeline:
+    """Test text processing and vectorization pipeline"""
 
     @pytest.fixture
-    def test_chunks(self):
-        """Sample chunks for testing"""
+    def sample_documents(self):
+        """Sample documents for testing"""
         return [
-            "Artificial intelligence is transforming how we work and live.",
-            "Machine learning algorithms can process vast amounts of data.",
-            "Deep learning neural networks are inspired by brain structure.",
-            "Natural language processing enables human-computer communication.",
-            "Computer vision allows machines to interpret visual information."
+            {
+                "text": "Machine learning is a subset of artificial intelligence that enables computers to learn from data without explicit programming.",
+                "source": "ml_basics.txt"
+            },
+            {
+                "text": "Deep learning uses neural networks with multiple layers to model and understand complex patterns in data.",
+                "source": "deep_learning.txt"
+            },
+            {
+                "text": "Natural language processing helps computers understand, interpret, and generate human language in a valuable way.",
+                "source": "nlp_intro.txt"
+            }
         ]
 
-    def test_encoder_with_valid_config(self, test_chunks, temp_dir):
-        """Test encoder with complete valid configuration"""
-        # Use default config which should have all required fields
-        config = get_default_config()
-        encoder = VideoEncoder(config=config)
-        encoder.add_chunks(test_chunks)
-
-        stats = encoder.get_stats()
-        assert stats['total_chunks'] == len(test_chunks)
-        assert stats['total_characters'] > 0
-
-        video_file = temp_dir / "test.mp4"
-        index_file = temp_dir / "test_index.json"
-
-        build_stats = encoder.build_video(
-            str(video_file),
-            str(index_file),
-            codec="mp4v",
-            show_progress=False
+    @pytest.fixture
+    def pipeline(self):
+        """Initialize pipeline with test configuration"""
+        return TextVectorPipeline(
+            model_name="all-MiniLM-L6-v2",
+            chunk_size=100,
+            chunk_overlap=20,
+            vector_dim=384
         )
 
-        assert video_file.exists()
-        assert index_file.exists()
-        assert build_stats['total_chunks'] == len(test_chunks)
-
-    def test_empty_input_handling(self, temp_dir):
-        """Test encoder behavior with empty inputs"""
-        encoder = VideoEncoder()
-
-        # Empty chunks list
-        encoder.add_chunks([])
-        stats = encoder.get_stats()
-        assert stats['total_chunks'] == 0
-        assert stats['total_characters'] == 0
-        assert stats['avg_chunk_size'] == 0
-
-        # Should not be able to build video with no chunks
-        video_file = temp_dir / "empty.mp4"
-        index_file = temp_dir / "empty_index.json"
-
-        # This should either raise an error or handle gracefully
-        try:
-            encoder.build_video(str(video_file), str(index_file), codec="mp4v", show_progress=False)
-            # If it doesn't raise an error, check that no video was created or it's empty
-            if video_file.exists():
-                assert video_file.stat().st_size == 0 or build_stats['total_chunks'] == 0
-        except (ValueError, RuntimeError) as e:
-            # Expected behavior - should raise an error for empty input
-            assert "chunk" in str(e).lower() or "empty" in str(e).lower()
-
-    def test_malformed_input_filtering(self, temp_dir):
-        """Test encoder filters out invalid chunks appropriately"""
-        # Mix of valid and invalid chunks
-        mixed_chunks = [
-            "Valid chunk with content",
-            "",  # Empty
-            "   ",  # Whitespace only
-            "Another valid chunk",
-            "\n\n\n",  # Newlines only
-            "Final valid chunk"
-        ]
-
-        encoder = VideoEncoder()
-        encoder.add_chunks(mixed_chunks)
-
-        stats = encoder.get_stats()
-        # Should filter out empty/whitespace chunks
-        assert stats['total_chunks'] <= len(mixed_chunks)
-        assert stats['total_chunks'] >= 3  # At least the valid ones
-
-        if stats['total_chunks'] > 0:
-            video_file = temp_dir / "filtered.mp4"
-            index_file = temp_dir / "filtered_index.json"
-
-            build_stats = encoder.build_video(
-                str(video_file), str(index_file),
-                codec="mp4v", show_progress=False
-            )
-            assert build_stats['total_chunks'] == stats['total_chunks']
-
-    def test_unicode_content_basic(self, temp_dir):
-        """Test basic unicode handling"""
-        unicode_chunks = [
-            "English text with basic content",
-            "Español con caracteres especiales: ñáéíóú",
-            "Français avec accents: àèùéç",
-            "Mixed content: English + special chars 🚀"
-        ]
-
-        encoder = VideoEncoder()
-        encoder.add_chunks(unicode_chunks)
-
-        video_file = temp_dir / "unicode.mp4"
-        index_file = temp_dir / "unicode_index.json"
-
-        # Should encode without errors
-        try:
-            build_stats = encoder.build_video(
-                str(video_file), str(index_file),
-                codec="mp4v", show_progress=False
-            )
-            assert build_stats['total_chunks'] > 0
-        except Exception as e:
-            pytest.skip(f"Unicode handling not fully implemented: {e}")
-
-
-class TestVideoRetrieverFixed:
-    """Fixed retriever testing with proper error handling"""
-
-    def create_test_video(self, temp_dir, chunks):
-        """Helper to create test video"""
-        encoder = VideoEncoder()
-        encoder.add_chunks(chunks)
-
-        video_file = temp_dir / "test.mp4"
-        index_file = temp_dir / "test_index.json"
-
-        encoder.build_video(str(video_file), str(index_file), codec="mp4v", show_progress=False)
-        return video_file, index_file
-
-    def test_missing_files_error_handling(self, temp_dir):
-        """Test proper error handling for missing files"""
-        nonexistent_video = temp_dir / "nonexistent.mp4"
-        nonexistent_index = temp_dir / "nonexistent_index.json"
-
-        # Should raise appropriate errors for missing files
-        with pytest.raises((FileNotFoundError, RuntimeError)):
-            VideoRetriever(str(nonexistent_video), str(nonexistent_index))
-
-    def test_basic_retrieval_functionality(self, temp_dir):
-        """Test basic retrieval works"""
-        chunks = [
-            "Machine learning is a subset of artificial intelligence",
-            "Deep learning uses neural networks with multiple layers",
-            "Natural language processing helps computers understand text"
-        ]
-
-        video_file, index_file = self.create_test_video(temp_dir, chunks)
-
-        retriever = VideoRetriever(str(video_file), str(index_file))
-
-        # Test basic search
-        results = retriever.search("machine learning", top_k=2)
-        assert isinstance(results, list)
-        assert len(results) <= 2
-
-        # If results found, they should be strings
-        for result in results:
-            assert isinstance(result, str)
-            assert len(result) > 0
-
-    def test_search_edge_cases_safe(self, temp_dir):
-        """Test search with various edge case queries safely"""
-        chunks = ["Normal content for testing", "Another piece of content"]
-        video_file, index_file = self.create_test_video(temp_dir, chunks)
-
-        retriever = VideoRetriever(str(video_file), str(index_file))
-
-        # Test various edge cases - should not crash
-        edge_queries = [
-            "",  # Empty query
-            "   ",  # Whitespace query
-            "nonexistent_term_xyz123",  # Likely no matches
-            "a" * 100,  # Long query
-        ]
-
-        for query in edge_queries:
-            try:
-                results = retriever.search(query, top_k=3)
-                assert isinstance(results, list)
-                assert len(results) <= 3
-            except Exception as e:
-                # Document what queries cause issues
-                pytest.skip(f"Query '{query[:10]}...' caused error: {e}")
-
-    def test_chunk_id_retrieval_safe(self, temp_dir):
-        """Test chunk ID retrieval with bounds checking"""
-        chunks = ["First chunk", "Second chunk", "Third chunk"]
-        video_file, index_file = self.create_test_video(temp_dir, chunks)
-
-        retriever = VideoRetriever(str(video_file), str(index_file))
-
-        # Test valid chunk IDs
-        try:
-            chunk_0 = retriever.get_chunk_by_id(0)
-            if chunk_0 is not None:
-                assert isinstance(chunk_0, str)
-                assert len(chunk_0) > 0
-        except Exception as e:
-            pytest.skip(f"Chunk retrieval by ID not implemented: {e}")
-
-        # Test invalid chunk ID - should handle gracefully
-        try:
-            invalid_chunk = retriever.get_chunk_by_id(999)
-            assert invalid_chunk is None  # Should return None for invalid IDs
-        except Exception:
-            # Some implementations might raise an exception, which is also acceptable
-            pass
-
-
-class TestQRCodeProcessingFixed:
-    """Fixed QR code processing tests"""
-
-    def test_qr_basic_functionality(self):
-        """Test basic QR encoding/decoding works"""
-        test_data = "Simple test message"
-
-        try:
-            # Test encoding
-            qr_image = encode_to_qr(test_data)
-            assert qr_image is not None
-
-            # Test frame conversion
-            frame = qr_to_frame(qr_image, (256, 256))
-            assert frame.shape == (256, 256, 3)
-
-            # Test decoding - this is where issues were found
-            decoded = decode_qr(frame)
-
-            if decoded is None:
-                pytest.skip("QR decoding not working reliably - needs investigation")
-            else:
-                assert decoded == test_data
-
-        except Exception as e:
-            pytest.skip(f"QR processing has issues: {e}")
-
-    def test_qr_size_handling_safe(self):
-        """Test QR with different data sizes safely"""
-        test_sizes = [
-            ("Small", "Short"),
-            ("Medium", "A" * 100),
-            ("Large", "B" * 500),
-        ]
-
-        working_sizes = []
-
-        for name, data in test_sizes:
-            try:
-                qr_image = encode_to_qr(data)
-                assert qr_image is not None
-
-                frame = qr_to_frame(qr_image, (512, 512))
-                decoded = decode_qr(frame)
-
-                if decoded == data:
-                    working_sizes.append(name)
-
-            except Exception as e:
-                # Document which sizes don't work
-                print(f"Size {name} failed: {e}")
-
-        # At least small size should work
-        if len(working_sizes) == 0:
-            pytest.skip("QR encoding/decoding not working for any test sizes")
-
-
-class TestErrorRecoveryRealistic:
-    """Realistic error recovery testing"""
-
-    def test_config_validation(self):
-        """Test configuration validation"""
-        # Test default config is valid
-        config = get_default_config()
-
-        # Should have required sections
-        required_sections = ['embedding', 'qr', 'chunking']
-        for section in required_sections:
-            assert section in config, f"Missing config section: {section}"
-
-        # Should be able to create encoder with default config
-        encoder = VideoEncoder(config=config)
-        assert encoder is not None
-
-    def test_partial_config_handling(self):
-        """Test handling of partial configurations"""
-        # Test with minimal config that caused the original test failure
-        minimal_configs = [
-            {"qr_size": (128, 128)},  # This was causing KeyError: 'embedding'
-            {"fps": 15},
-            {},  # Empty config should use defaults
-        ]
-
-        for config in minimal_configs:
-            try:
-                encoder = VideoEncoder(config=config)
-                # If creation succeeds, should be able to get stats
-                stats = encoder.get_stats()
-                assert isinstance(stats, dict)
-            except KeyError as e:
-                # Document what configs are problematic
-                pytest.skip(f"Config {config} causes KeyError: {e}")
-            except Exception as e:
-                pytest.skip(f"Config {config} causes error: {e}")
-
-    def test_file_corruption_detection(self, temp_dir):
-        """Test detection of corrupted files"""
-        # Create a fake corrupted video file
-        corrupted_video = temp_dir / "corrupted.mp4"
-        with open(corrupted_video, 'wb') as f:
-            f.write(b"This is not a valid video file at all")
-
-        # Create a fake index file
-        fake_index = temp_dir / "fake_index.json"
-        fake_index.write_text('{"invalid": "json structure"}')
-
-        # Should detect corruption appropriately
-        try:
-            retriever = VideoRetriever(str(corrupted_video), str(fake_index))
-            pytest.fail("Should have detected corrupted video")
-        except Exception as e:
-            # Expected - should detect corruption
-            assert "video" in str(e).lower() or "open" in str(e).lower()
-
-
-class TestPerformanceBasic:
-    """Basic performance testing"""
-
-    def test_encoding_performance_basic(self, temp_dir):
-        """Test basic encoding performance is reasonable"""
-        # Small dataset for reliable testing
-        chunks = [f"Performance test chunk {i} with some content" for i in range(10)]
-
-        encoder = VideoEncoder()
-
-        start_time = time.time()
-        encoder.add_chunks(chunks)
-
-        video_file = temp_dir / "perf_test.mp4"
-        index_file = temp_dir / "perf_test_index.json"
-
-        build_stats = encoder.build_video(
-            str(video_file), str(index_file),
-            codec="mp4v", show_progress=False
-        )
-
-        total_time = time.time() - start_time
-
-        # Should complete in reasonable time (generous limits for CI)
-        assert total_time < 60.0  # 1 minute for 10 chunks
-        assert build_stats['total_chunks'] == 10
-
-        # Should create actual files
-        assert video_file.exists()
-        assert video_file.stat().st_size > 0
-
-    def test_search_performance_basic(self, temp_dir):
-        """Test basic search performance"""
-        chunks = [
-            "Artificial intelligence and machine learning",
-            "Data science and analytics",
-            "Software engineering practices",
-            "Cloud computing services",
-            "Cybersecurity measures"
-        ]
-
-        encoder = VideoEncoder()
-        encoder.add_chunks(chunks)
-
-        video_file = temp_dir / "search_perf.mp4"
-        index_file = temp_dir / "search_perf_index.json"
-        encoder.build_video(str(video_file), str(index_file), codec="mp4v", show_progress=False)
-
-        retriever = VideoRetriever(str(video_file), str(index_file))
-
-        # Test search speed
-        start_time = time.time()
-        results = retriever.search("artificial intelligence", top_k=3)
-        search_time = time.time() - start_time
-
-        # Should be fast (generous limit)
-        assert search_time < 5.0  # 5 seconds is very generous
-        assert isinstance(results, list)
-
-
-class TestIntegrationBasic:
-    """Basic integration testing"""
-
-    def test_end_to_end_basic(self, temp_dir):
-        """Test basic end-to-end workflow"""
-        # Simple knowledge base
-        knowledge = [
-            "Python is a programming language",
-            "JavaScript is used for web development",
-            "Machine learning processes data automatically"
-        ]
-
-        # Step 1: Encode
-        encoder = VideoEncoder()
-        encoder.add_chunks(knowledge)
-
-        video_file = temp_dir / "integration.mp4"
-        index_file = temp_dir / "integration_index.json"
-
-        build_stats = encoder.build_video(
-            str(video_file), str(index_file),
-            codec="mp4v", show_progress=False
-        )
-
-        assert build_stats['total_chunks'] == len(knowledge)
-
-        # Step 2: Retrieve
-        retriever = VideoRetriever(str(video_file), str(index_file))
-
-        # Step 3: Search
-        results = retriever.search("programming", top_k=2)
-
-        # Should find relevant content
-        assert len(results) > 0
-        found_python = any("Python" in result for result in results)
-        assert found_python  # Should find the Python chunk
-
-    def test_file_persistence(self, temp_dir):
-        """Test that files persist correctly"""
-        encoder = VideoEncoder()
-        encoder.add_chunks(["Persistence test content"])
-
-        video_file = temp_dir / "persistent.mp4"
-        index_file = temp_dir / "persistent_index.json"
-        encoder.build_video(str(video_file), str(index_file), codec="mp4v", show_progress=False)
-
-        # Clear encoder
-        del encoder
-
-        # Should be able to load retriever from files
-        retriever = VideoRetriever(str(video_file), str(index_file))
-        results = retriever.search("persistence", top_k=1)
-
-        assert len(results) > 0
-        assert "Persistence" in results[0] or "test" in results[0]
-
-
-# Test utilities
-class TestUtilitiesFixed:
-    """Test utility functions"""
-
-    def test_config_functions(self):
-        """Test configuration functions work"""
-        from ragged.video.config import get_default_config, get_codec_parameters
-
-        # Should return valid config
-        config = get_default_config()
-        assert isinstance(config, dict)
-        assert 'embedding' in config
-
-        # Should get codec parameters
-        codec_params = get_codec_parameters("mp4v")
-        assert isinstance(codec_params, dict)
-
-    def test_text_chunking_basic(self):
-        """Test basic text chunking"""
-        from ragged.video.utils import chunk_text
-
-        text = "This is sentence one. This is sentence two. This is sentence three."
-        chunks = chunk_text(text, chunk_size=30, overlap=5)
+    def test_text_chunking_basic(self, pipeline):
+        """Test basic text chunking functionality"""
+        text = "This is the first sentence. This is the second sentence. This is the third sentence with more content."
+        chunks = pipeline.chunk_text(text, source="test.txt")
 
         assert isinstance(chunks, list)
         assert len(chunks) > 0
 
-        # All chunks should be strings
         for chunk in chunks:
-            assert isinstance(chunk, str)
+            assert isinstance(chunk, TextChunk)
+            assert chunk.text
+            assert chunk.source == "test.txt"
+            assert chunk.word_count > 0
+            assert chunk.token_count > 0
+
+    def test_chunking_with_overlap(self, pipeline):
+        """Test chunking preserves context with overlap"""
+        long_text = "Sentence one here. " * 50  # Create long text
+        chunks = pipeline.chunk_text(long_text, source="long.txt")
+
+        if len(chunks) > 1:
+            # Check for overlap between consecutive chunks
+            first_words = chunks[0].text.split()[-5:]  # Last 5 words of first chunk
+            second_words = chunks[1].text.split()[:10]  # First 10 words of second chunk
+
+            # Should have some overlap
+            overlap_found = any(word in second_words for word in first_words)
+            assert overlap_found
+
+    def test_empty_input_handling(self, pipeline):
+        """Test handling of empty or invalid inputs"""
+        # Empty text
+        chunks = pipeline.chunk_text("", source="empty.txt")
+        assert len(chunks) == 0
+
+        # Whitespace only
+        chunks = pipeline.chunk_text("   \n\n  ", source="whitespace.txt")
+        assert len(chunks) == 0
+
+        # Empty documents list
+        vectors, metadata = pipeline.process_documents([])
+        assert len(vectors) == 0
+        assert len(metadata) == 0
+
+    def test_document_processing(self, pipeline, sample_documents):
+        """Test processing multiple documents"""
+        vectors, metadata = pipeline.process_documents(sample_documents)
+
+        assert len(vectors) > 0
+        assert len(metadata) == len(vectors)
+        assert vectors.shape[1] == pipeline.vector_dim
+
+        # Check metadata structure
+        for meta in metadata:
+            assert "text" in meta
+            assert "source" in meta
+            assert "chunk_id" in meta
+            assert "word_count" in meta
+            assert "token_count" in meta
+            assert "text_hash" in meta
+
+    def test_unicode_handling(self, pipeline):
+        """Test handling of unicode content"""
+        unicode_docs = [
+            {"text": "English text with emojis 🚀 and unicode characters", "source": "unicode.txt"},
+            {"text": "Texto en español con acentos: áéíóú ñ", "source": "spanish.txt"},
+            {"text": "Français avec caractères spéciaux: àèùç", "source": "french.txt"}
+        ]
+
+        try:
+            vectors, metadata = pipeline.process_documents(unicode_docs)
+            assert len(vectors) > 0
+            assert vectors.shape[1] == pipeline.vector_dim
+        except Exception as e:
+            pytest.skip(f"Unicode handling needs improvement: {e}")
+
+    def test_vector_generation(self, pipeline, sample_documents):
+        """Test vector generation produces valid embeddings"""
+        vectors, metadata = pipeline.process_documents(sample_documents)
+
+        # Vectors should be normalized and finite
+        assert np.all(np.isfinite(vectors))
+        assert vectors.dtype == np.float32
+
+        # Different texts should produce different vectors
+        if len(vectors) > 1:
+            similarity = np.dot(vectors[0], vectors[1])
+            assert 0.0 <= similarity <= 1.0  # Cosine similarity range
 
 
-# Performance monitoring
-def monitor_test_performance():
-    """Monitor test performance and generate report"""
-    import psutil
-    import os
+class TestVectorMP4Encoder:
+    """Test MP4 encoding functionality"""
 
-    process = psutil.Process(os.getpid())
-    initial_memory = process.memory_info().rss / 1024 / 1024
+    @pytest.fixture
+    def sample_vectors(self):
+        """Generate sample vectors for testing"""
+        np.random.seed(42)
+        vectors = np.random.randn(50, 384).astype(np.float32)
+        # Normalize for cosine similarity
+        vectors = vectors / np.linalg.norm(vectors, axis=1, keepdims=True)
 
-    print(f"Initial memory usage: {initial_memory:.2f} MB")
+        metadata = []
+        for i in range(50):
+            metadata.append({
+                "text": f"Sample text chunk {i}",
+                "source": f"doc_{i//10}.txt",
+                "chunk_id": i,
+                "topic": f"topic_{i%5}",
+                "word_count": 10 + i,
+                "token_count": 15 + i,
+                "text_hash": hashlib.md5(f"text_{i}".encode()).hexdigest()[:8]
+            })
 
-    # This would be called by pytest hooks
-    return {
-        'initial_memory_mb': initial_memory,
-        'timestamp': time.time()
-    }
+        return vectors, metadata
+
+    def test_encoder_initialization(self):
+        """Test encoder initialization with different configurations"""
+        # Default initialization
+        encoder = VectorMP4Encoder()
+        assert encoder.vector_dim == 384
+        assert encoder.chunk_size == 1000
+        assert len(encoder.fragments) == 0
+
+        # Custom initialization
+        encoder = VectorMP4Encoder(vector_dim=512, chunk_size=500)
+        assert encoder.vector_dim == 512
+        assert encoder.chunk_size == 500
+
+    def test_add_vectors_basic(self, sample_vectors):
+        """Test adding vectors to encoder"""
+        vectors, metadata = sample_vectors
+        encoder = VectorMP4Encoder(vector_dim=384, chunk_size=20)
+
+        encoder.add_vectors(vectors, metadata)
+
+        assert encoder.manifest["metadata"]["total_vectors"] == len(vectors)
+        assert len(encoder.fragments) > 0
+        assert len(encoder.all_vectors) == len(vectors)
+
+    def test_dimension_mismatch_error(self, sample_vectors):
+        """Test error handling for dimension mismatches"""
+        vectors, metadata = sample_vectors
+        encoder = VectorMP4Encoder(vector_dim=512)  # Wrong dimension
+
+        with pytest.raises(ValueError, match="Vector dimension mismatch"):
+            encoder.add_vectors(vectors, metadata)
+
+    def test_chunking_behavior(self, sample_vectors):
+        """Test vector chunking into fragments"""
+        vectors, metadata = sample_vectors
+        encoder = VectorMP4Encoder(vector_dim=384, chunk_size=10)
+
+        encoder.add_vectors(vectors, metadata)
+
+        # Should create multiple fragments
+        expected_fragments = (len(vectors) + encoder.chunk_size - 1) // encoder.chunk_size
+        assert len(encoder.fragments) == expected_fragments
+
+        # Check fragment structure
+        for fragment in encoder.fragments:
+            assert "id" in fragment
+            assert "vectors" in fragment
+            assert "metadata" in fragment
+            assert "vector_count" in fragment
+
+    def test_mp4_encoding(self, sample_vectors, tmp_path):
+        """Test complete MP4 encoding process"""
+        vectors, metadata = sample_vectors
+        encoder = VectorMP4Encoder(vector_dim=384, chunk_size=20)
+        encoder.add_vectors(vectors, metadata)
+
+        output_file = tmp_path / "test_vectors.mp4"
+
+        # Should encode without errors
+        encoder.encode_to_mp4(str(output_file))
+
+        # Check output files exist
+        assert output_file.exists()
+        assert output_file.stat().st_size > 0
+
+        manifest_file = tmp_path / "test_vectors_manifest.json"
+        assert manifest_file.exists()
+
+        # Verify manifest content
+        with open(manifest_file, 'r') as f:
+            manifest = json.load(f)
+
+        assert manifest["metadata"]["total_vectors"] == len(vectors)
+        assert manifest["metadata"]["vector_dim"] == 384
+
+
+class TestEndToEndPipeline:
+    """Test complete text-to-MP4 pipeline"""
+
+    @pytest.fixture
+    def knowledge_base(self):
+        """Sample knowledge base for testing"""
+        return [
+            {
+                "text": "Python is a high-level programming language known for its simplicity and readability. It supports multiple programming paradigms.",
+                "source": "python_intro.txt"
+            },
+            {
+                "text": "JavaScript is the programming language of the web. It enables interactive web pages and is an essential part of web applications.",
+                "source": "javascript_basics.txt"
+            },
+            {
+                "text": "Artificial intelligence involves creating systems that can perform tasks that typically require human intelligence.",
+                "source": "ai_overview.txt"
+            },
+            {
+                "text": "Machine learning is a subset of AI that enables systems to learn and improve from experience without explicit programming.",
+                "source": "ml_definition.txt"
+            }
+        ]
+
+    def test_complete_pipeline(self, knowledge_base, tmp_path):
+        """Test complete pipeline from documents to MP4"""
+        output_file = tmp_path / "knowledge_base.mp4"
+
+        # Should complete without errors
+        create_text_vector_mp4(knowledge_base, str(output_file))
+
+        # Verify outputs
+        assert output_file.exists()
+        assert output_file.stat().st_size > 0
+
+        # Check companion files
+        manifest_file = tmp_path / "knowledge_base_manifest.json"
+        faiss_file = tmp_path / "knowledge_base_faiss.index"
+
+        assert manifest_file.exists()
+        # Faiss file creation depends on vector count
+
+        # Verify manifest structure
+        with open(manifest_file, 'r') as f:
+            manifest = json.load(f)
+
+        assert "metadata" in manifest
+        assert "vector_map" in manifest
+        assert manifest["metadata"]["total_vectors"] > 0
+
+    def test_file_input_processing(self, tmp_path):
+        """Test processing files directly"""
+        # Create test files
+        test_files = []
+        for i, content in enumerate([
+            "Content of first document about programming.",
+            "Content of second document about data science.",
+            "Content of third document about machine learning."
+        ]):
+            file_path = tmp_path / f"doc_{i}.txt"
+            file_path.write_text(content)
+            test_files.append(str(file_path))
+
+        pipeline = TextVectorPipeline()
+        vectors, metadata = pipeline.process_text_files(test_files)
+
+        assert len(vectors) > 0
+        assert len(metadata) == len(vectors)
+
+        # Should preserve source file information
+        sources = [meta["source"] for meta in metadata]
+        assert any("doc_0.txt" in source for source in sources)
+
+    def test_error_recovery(self, tmp_path):
+        """Test error recovery and graceful handling"""
+        # Test with some invalid documents
+        mixed_docs = [
+            {"text": "Valid document content", "source": "valid.txt"},
+            {"text": "", "source": "empty.txt"},  # Empty
+            {"text": "   ", "source": "whitespace.txt"},  # Whitespace only
+            {"text": "Another valid document", "source": "valid2.txt"}
+        ]
+
+        output_file = tmp_path / "mixed_content.mp4"
+
+        # Should handle gracefully and process valid content
+        create_text_vector_mp4(mixed_docs, str(output_file))
+
+        if output_file.exists():
+            manifest_file = tmp_path / "mixed_content_manifest.json"
+            with open(manifest_file, 'r') as f:
+                manifest = json.load(f)
+
+            # Should have processed some vectors (from valid docs)
+            assert manifest["metadata"]["total_vectors"] > 0
+
+    def test_large_document_handling(self, tmp_path):
+        """Test handling of large documents"""
+        # Create a large document
+        large_text = "This is a sentence that will be repeated many times. " * 200
+        large_doc = [{"text": large_text, "source": "large_doc.txt"}]
+
+        output_file = tmp_path / "large_doc.mp4"
+
+        start_time = time.time()
+        create_text_vector_mp4(large_doc, str(output_file))
+        processing_time = time.time() - start_time
+
+        # Should complete in reasonable time
+        assert processing_time < 60.0  # 1 minute limit
+        assert output_file.exists()
+
+
+class TestPerformanceAndScaling:
+    """Test performance characteristics"""
+
+    def test_chunking_performance(self):
+        """Test chunking performance with various text sizes"""
+        pipeline = TextVectorPipeline()
+
+        test_sizes = [
+            ("Small", "Short text. " * 10),
+            ("Medium", "Medium length text with sentences. " * 100),
+            ("Large", "Long text document with many sentences. " * 500)
+        ]
+
+        for name, text in test_sizes:
+            start_time = time.time()
+            chunks = pipeline.chunk_text(text, source=f"{name.lower()}.txt")
+            chunk_time = time.time() - start_time
+
+            assert len(chunks) > 0
+            assert chunk_time < 10.0  # Should be fast
+
+            print(f"{name}: {len(chunks)} chunks in {chunk_time:.3f}s")
+
+    def test_encoding_performance(self, tmp_path):
+        """Test encoding performance with different dataset sizes"""
+        sizes_to_test = [10, 50, 100]
+
+        for size in sizes_to_test:
+            # Generate test documents
+            docs = []
+            for i in range(size):
+                docs.append({
+                    "text": f"Document {i} with some content about topic {i % 5}. " * 3,
+                    "source": f"doc_{i}.txt"
+                })
+
+            output_file = tmp_path / f"perf_test_{size}.mp4"
+
+            start_time = time.time()
+            create_text_vector_mp4(docs, str(output_file))
+            total_time = time.time() - start_time
+
+            print(f"Size {size}: {total_time:.3f}s")
+
+            # Reasonable performance expectations
+            assert total_time < 30.0  # 30 seconds max
+            assert output_file.exists()
+
+    def test_memory_usage_basic(self):
+        """Basic memory usage monitoring"""
+        import psutil
+        import os
+
+        process = psutil.Process(os.getpid())
+        initial_memory = process.memory_info().rss / 1024 / 1024
+
+        # Process moderate dataset
+        docs = [
+            {"text": f"Memory test document {i}. " * 20, "source": f"mem_{i}.txt"}
+            for i in range(50)
+        ]
+
+        pipeline = TextVectorPipeline()
+        vectors, metadata = pipeline.process_documents(docs)
+
+        peak_memory = process.memory_info().rss / 1024 / 1024
+        memory_increase = peak_memory - initial_memory
+
+        print(f"Memory increase: {memory_increase:.2f} MB")
+
+        # Should not use excessive memory
+        assert memory_increase < 500  # 500MB limit for this test
+
+
+class TestConfigurationHandling:
+    """Test configuration and parameter handling"""
+
+    def test_model_configuration(self):
+        """Test different model configurations"""
+        # Test with different models (if available)
+        models_to_test = [
+            ("all-MiniLM-L6-v2", 384),
+            # Add other models as available
+        ]
+
+        for model_name, expected_dim in models_to_test:
+            try:
+                pipeline = TextVectorPipeline(
+                    model_name=model_name,
+                    vector_dim=expected_dim
+                )
+
+                # Test with sample text
+                docs = [{"text": "Test document for model", "source": "test.txt"}]
+                vectors, metadata = pipeline.process_documents(docs)
+
+                assert vectors.shape[1] == expected_dim
+
+            except Exception as e:
+                pytest.skip(f"Model {model_name} not available: {e}")
+
+    def test_chunking_parameters(self):
+        """Test different chunking parameters"""
+        test_text = "This is sentence one. This is sentence two. " * 20
+
+        param_sets = [
+            (50, 10),   # Small chunks, small overlap
+            (100, 20),  # Medium chunks, medium overlap
+            (200, 50),  # Large chunks, large overlap
+        ]
+
+        for chunk_size, overlap in param_sets:
+            pipeline = TextVectorPipeline(
+                chunk_size=chunk_size,
+                chunk_overlap=overlap
+            )
+
+            chunks = pipeline.chunk_text(test_text, source="param_test.txt")
+
+            assert len(chunks) > 0
+
+            # Verify chunk sizes are reasonable
+            for chunk in chunks:
+                assert chunk.token_count <= chunk_size * 1.2  # Allow some flexibility
 
 
 if __name__ == "__main__":
-    # Run the fixed tests
-    pytest.main([__file__, "-v", "--tb=short"])
+    # Run tests with coverage
+    pytest.main([__file__, "-v", "--tb=short", "-x"])

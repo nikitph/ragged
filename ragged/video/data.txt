@@ -1,0 +1,113 @@
+Electrophoresis is a fundamental technique used in biochemistry, molecular biology, and analytical chemistry to separate charged biomolecules—like DNA, RNA, or proteins—based on their size, charge, and conformation under the influence of an electric field.
+
+⸻
+
+🔬 Definition
+
+Electrophoresis is the movement of charged particles through a medium (usually a gel or liquid) in response to an electric field. Positively charged particles migrate toward the cathode (−), while negatively charged ones move toward the anode (+).
+
+⸻
+
+📚 Types of Electrophoresis
+
+Type	Used For	Medium Used
+Agarose Gel Electrophoresis	DNA/RNA separation	Agarose gel
+Polyacrylamide Gel Electrophoresis (PAGE)	Proteins/DNA fragments	Polyacrylamide gel
+SDS-PAGE	Denatured proteins	SDS-treated polyacrylamide
+Isoelectric Focusing (IEF)	Proteins by pI	pH gradient gel
+Capillary Electrophoresis	Small ions, peptides	Capillary tube (liquid)
+2D Electrophoresis	Complex protein mixes	IEF + SDS-PAGE
+
+
+⸻
+
+⚙️ Principle
+	1.	Charge-Based Separation: Particles move in response to an electric field. The direction and speed depend on:
+	•	Net charge
+	•	Size
+	•	Shape
+	•	Medium resistance
+	2.	Gel Matrix: Acts like a sieve. Larger molecules move slower through the pores.
+	3.	Electric Field: Typically 50–150 volts is applied. Higher voltages speed up migration but can cause smearing due to heat.
+
+⸻
+
+🧪 Common Buffers
+
+Buffer Type	Used In	Purpose
+TAE or TBE	Agarose for DNA	Maintains pH and conducts current
+Tris-Glycine	SDS-PAGE	Provides ions and stable pH
+Urea	IEF or PAGE	Denaturing agent for protein unfolding
+
+
+⸻
+
+🧬 Application Areas
+
+1. Nucleic Acid Analysis
+	•	DNA fingerprinting (Forensics)
+	•	PCR verification
+	•	Plasmid mapping
+	•	RNA integrity check
+
+2. Protein Analysis
+	•	Protein purity assessment
+	•	Molecular weight determination
+	•	Western blotting (SDS-PAGE + antibody probing)
+	•	2D electrophoresis for proteomics
+
+3. Clinical Diagnostics
+	•	Hemoglobin variants (e.g., Sickle Cell detection)
+	•	Serum protein electrophoresis (SPEP) for multiple myeloma
+
+⸻
+
+🧬 Step-by-Step: Agarose Gel Electrophoresis (DNA)
+	1.	Gel Preparation: Agarose is melted in buffer, poured into a tray, and allowed to set with a comb for wells.
+	2.	Sample Preparation: DNA mixed with loading dye (adds weight + color).
+	3.	Running the Gel: Samples are loaded into wells, and a current is applied (usually ~100V).
+	4.	Migration: DNA (negatively charged) moves toward the anode. Shorter fragments move faster.
+	5.	Visualization: Gel is stained with ethidium bromide or SYBR Green, then visualized under UV light.
+
+⸻
+
+🔍 SDS-PAGE for Protein Separation
+	1.	SDS Denaturation: Proteins are treated with Sodium Dodecyl Sulfate (SDS) to impart a uniform negative charge and unfold their 3D structure.
+	2.	Gel Loading: Protein samples with dye are loaded into wells.
+	3.	Electrophoresis: Proteins migrate based on molecular weight (small proteins move faster).
+	4.	Staining: Gel is stained with Coomassie Blue or Silver stain to visualize protein bands.
+
+⸻
+
+⚠️ Factors Affecting Electrophoresis
+	•	Voltage: Higher = faster, but may cause overheating
+	•	Gel concentration: Higher % gels = better separation of small molecules
+	•	Buffer composition: Affects migration speed and resolution
+	•	Sample quality: Degraded samples smear or show extra bands
+	•	Time of run: Under- or over-running may distort bands
+
+⸻
+
+✅ Advantages
+	•	Simple and cost-effective
+	•	High resolution of biomolecules
+	•	Can separate by multiple properties (charge, size, pI)
+	•	Adaptable for many molecules
+
+⸻
+
+❌ Limitations
+	•	Not quantitative (unless combined with densitometry)
+	•	Limited scalability
+	•	Sensitive to run conditions
+	•	Smearing/artifacts with improper setup
+
+⸻
+
+🧠 Conceptual Summary
+
+“Electrophoresis is like a race in a gel stadium, where molecules are the runners, their size is their speed handicap, and their charge is the motivation. The more charged and smaller they are, the faster they run.”
+
+⸻
+
+If you’d like code to simulate an electrophoresis run or a diagram for your presentation or paper, I can generate that too.
