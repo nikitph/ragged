@@ -1,5 +1,5 @@
 from .encoder import VideoEncoder
-from .retriever import VideoRetriever
+from .decoder import VideoRetriever
 
 # Create video memory from text chunks
 chunks = ["Important fact 1", "Important fact 2", "Historical event details"]

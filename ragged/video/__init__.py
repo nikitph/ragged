@@ -1,5 +1,5 @@
 from .encoder import VideoEncoder
-from .retriever import VideoRetriever
+from .decoder import VideoRetriever
 from .config import get_default_config, get_codec_parameters
 from .utils import chunk_text, encode_to_qr, decode_qr
 
