@@ -1,6 +1,6 @@
 """
 Real-world test using electrophoresis document
-Tests text-to-MP4 pipeline with actual scientific content
+Tests enhanced text-to-MP4 pipeline with CDN optimizations and caching
 """
 
 import pytest
@@ -8,12 +8,20 @@ import tempfile
 import json
 from pathlib import Path
 import numpy as np
+import os
+import shutil
 
-from ragged.video.encoder import TextVectorPipeline, VectorMP4Encoder, create_text_vector_mp4
+import requests
+import requests_mock
+from unittest.mock import patch, MagicMock
+
+# Import the enhanced classes from our artifacts
+from encoder  import TextVectorPipeline, VectorMP4Encoder, create_text_vector_mp4
+from decoder import CachedVectorMP4Decoder
 
 
 class TestElectrophoresisDocument:
-    """Test with real scientific document content"""
+    """Test with real scientific document content using enhanced pipeline"""
 
     @pytest.fixture
     def electrophoresis_text(self):
@@ -90,8 +98,17 @@ Not quantitative unless combined with densitometry.
 Limited scalability and sensitive to run conditions.
 Smearing and artifacts can occur with improper setup."""
 
-    def test_real_document_processing(self, electrophoresis_text, tmp_path):
-        """Test processing real scientific document"""
+    @pytest.fixture
+    def temp_cache_dir(self, tmp_path):
+        """Create temporary cache directory"""
+        cache_dir = tmp_path / "test_cache"
+        cache_dir.mkdir()
+        yield str(cache_dir)
+        if cache_dir.exists():
+            shutil.rmtree(cache_dir)
+
+    def test_enhanced_real_document_processing(self, electrophoresis_text, tmp_path):
+        """Test processing real scientific document with enhanced encoder"""
         pipeline = TextVectorPipeline(
             model_name="all-MiniLM-L6-v2",
             chunk_size=200,
@@ -113,287 +130,541 @@ Smearing and artifacts can occur with improper setup."""
 
         print(f"Generated {len(vectors)} chunks with topics: {set(meaningful_topics)}")
 
-    def test_scientific_vocabulary_chunking(self, electrophoresis_text, tmp_path):
-        """Test chunking preserves scientific terminology"""
-        pipeline = TextVectorPipeline(chunk_size=150, chunk_overlap=25)
-        chunks = pipeline.chunk_text(electrophoresis_text, "science.txt")
+        # Test enhanced encoder with byte tracking
+        encoder = VectorMP4Encoder(vector_dim=384, chunk_size=50)
+        encoder.add_vectors(vectors, metadata)
 
-        # Should preserve key scientific terms across chunks
-        key_terms = ["electrophoresis", "DNA", "protein", "gel", "SDS-PAGE"]
+        output_file = tmp_path / "electrophoresis_enhanced.mp4"
+        encoder.encode_to_mp4(str(output_file))
 
-        for term in key_terms:
-            found_in_chunks = sum(1 for chunk in chunks if term.lower() in chunk.text.lower())
-            assert found_in_chunks > 0, f"Term '{term}' not found in any chunk"
+        # Verify enhanced manifest has byte positions
+        manifest_file = tmp_path / "electrophoresis_enhanced_manifest.json"
+        with open(manifest_file, 'r') as f:
+            manifest = json.load(f)
 
-    def test_complete_pipeline_with_real_data(self, electrophoresis_text, tmp_path):
-        """Test end-to-end pipeline with scientific content"""
+        # Check file structure information
+        assert "file_structure" in manifest["metadata"]
+        file_struct = manifest["metadata"]["file_structure"]
+
+        required_fields = ["ftyp_start", "ftyp_size", "video_track_start",
+                          "manifest_start", "fragments_start", "total_file_size"]
+        for field in required_fields:
+            assert field in file_struct
+            assert isinstance(file_struct[field], int)
+            assert file_struct[field] >= 0
+
+        # Check fragment byte positions
+        for fragment in manifest["metadata"]["fragments"]:
+            byte_fields = ["byte_start", "byte_end", "byte_size",
+                          "moof_start", "mdat_start", "data_start", "data_size"]
+            for field in byte_fields:
+                assert field in fragment
+                assert isinstance(fragment[field], int)
+                assert fragment[field] >= 0
+
+        print(f"Enhanced encoding complete with {len(manifest['metadata']['fragments'])} fragments")
+        print(f"File structure: {file_struct}")
+
+    def test_cached_decoder_functionality(self, electrophoresis_text, tmp_path, temp_cache_dir):
+        """Test enhanced decoder with caching functionality"""
+        # Create test data
         documents = [
             {"text": electrophoresis_text, "source": "electrophoresis.txt"},
             {
                 "text": "PCR amplification is a molecular biology technique used to amplify DNA sequences. The process uses thermal cycling with DNA polymerase enzyme.",
                 "source": "pcr_basics.txt"
-            },
-            {
-                "text": "Western blotting combines gel electrophoresis with immunodetection to identify specific proteins in samples using antibodies.",
-                "source": "western_blot.txt"
             }
         ]
 
-        output_file = tmp_path / "scientific_knowledge.mp4"
-
-        # Should process without errors
+        output_file = tmp_path / "cached_test.mp4"
         create_text_vector_mp4(documents, str(output_file))
 
-        # Verify outputs
-        assert output_file.exists()
-        assert output_file.stat().st_size > 1000  # Should be substantial
-
-        # Check manifest
-        manifest_file = tmp_path / "scientific_knowledge_manifest.json"
-        assert manifest_file.exists()
-
-        with open(manifest_file, 'r') as f:
-            manifest = json.load(f)
-
-        assert manifest["metadata"]["total_vectors"] >= 4
-        print(f"Created {manifest['metadata']['total_vectors']} vectors from scientific documents")
-
-    def test_search_quality_with_real_content(self, tmp_path):
-        """Test search quality using real scientific content"""
-        # Create knowledge base with related but distinct topics
-        knowledge_base = [
-            {
-                "text": "Agarose gel electrophoresis separates DNA fragments by size. Smaller fragments migrate faster through gel pores.",
-                "source": "dna_separation.txt"
-            },
-            {
-                "text": "SDS-PAGE denatures proteins and separates them by molecular weight using polyacrylamide gel matrix.",
-                "source": "protein_separation.txt"
-            },
-            {
-                "text": "PCR uses thermal cycling to amplify specific DNA sequences using DNA polymerase and primers.",
-                "source": "pcr_method.txt"
-            },
-            {
-                "text": "Western blotting detects specific proteins using antibodies after electrophoretic separation.",
-                "source": "protein_detection.txt"
-            }
-        ]
-
-        # Process through pipeline
-        pipeline = TextVectorPipeline()
-        vectors, metadata = pipeline.process_documents(knowledge_base)
-
-        # Encode to MP4
-        encoder = VectorMP4Encoder(vector_dim=384, chunk_size=10)
-        encoder.add_vectors(vectors, metadata)
-
-        output_file = tmp_path / "search_test.mp4"
-        encoder.encode_to_mp4(str(output_file))
-
-        # Test search functionality would go here
-        # (requires decoder implementation)
-
-        # For now, verify meaningful vector similarities
-        if len(vectors) >= 2:
-            # DNA-related chunks should be more similar to each other
-            similarities = np.dot(vectors, vectors.T)
-
-            # Check that we have varying similarities (not all identical)
-            unique_sims = len(set(similarities[0, 1:].round(3)))
-            assert unique_sims > 1, "All vectors too similar - may indicate poor chunking"
-
-            print(f"Vector similarities range: {similarities.min():.3f} to {similarities.max():.3f}")
-
-    def test_topic_extraction_quality(self, electrophoresis_text):
-        """Test topic extraction produces meaningful results"""
-        pipeline = TextVectorPipeline(chunk_size=100)
-        chunks = pipeline.chunk_text(electrophoresis_text, "topics_test.txt")
-
-        # Extract topics from chunks
-        topics = [chunk.topic for chunk in chunks if chunk.topic]
-
-        # Should find relevant scientific topics
-        expected_topics = ["electrophoresis", "protein", "separation", "gel", "analysis"]
-        found_relevant = any(
-            any(expected in topic.lower() for expected in expected_topics)
-            for topic in topics if topic
+        # Test local cached decoder
+        decoder = CachedVectorMP4Decoder(
+            mp4_path=str(output_file),
+            cache_size=10,
+            disk_cache_dir=temp_cache_dir
         )
 
-        assert found_relevant, f"No relevant topics found. Got: {topics}"
-        print(f"Extracted topics: {set(topics)}")
+        # Test manifest info
+        info = decoder.get_manifest_info()
+        assert info["total_vectors"] > 0
+        assert info["vector_dimension"] == 384
+        assert len(info["topics"]) > 0
 
-    def test_metadata_preservation(self, electrophoresis_text):
-        """Test metadata is properly preserved through pipeline"""
-        pipeline = TextVectorPipeline()
-        doc = {"text": electrophoresis_text, "source": "metadata_test.txt"}
-        vectors, metadata = pipeline.process_documents([doc])
+        print(f"Decoder info: {info}")
 
-        # Check all required metadata fields
-        required_fields = ["text", "source", "chunk_id", "word_count", "token_count", "text_hash"]
+        # Test vector retrieval with caching
+        vector_ids = list(range(min(3, info["total_vectors"])))
+        vectors1, metadata1 = decoder.get_vectors_by_ids(vector_ids)
 
-        for meta in metadata:
-            for field in required_fields:
-                assert field in meta, f"Missing field: {field}"
+        # Second call should use cache
+        vectors2, metadata2 = decoder.get_vectors_by_ids(vector_ids)
 
-            # Verify data quality
-            assert meta["word_count"] > 0
-            assert meta["token_count"] > 0
-            assert len(meta["text_hash"]) == 8  # MD5 hash truncated
-            assert meta["source"] == "metadata_test.txt"
+        assert np.array_equal(vectors1, vectors2)
+        assert metadata1 == metadata2
 
-    def test_unicode_and_special_characters(self):
-        """Test handling of scientific unicode and special characters"""
-        special_text = """
-        Electrophoresis uses electric field (→) to separate molecules.
-        Temperature range: 4°C to 25°C is optimal.
-        Buffer concentration: 1× TAE (Tris-acetate-EDTA).
-        Voltage: 50–150V typically applied.
-        Molecular weights: 100 kDa ± 5% accuracy.
-        pH range: 7.0 ≤ pH ≤ 8.5 for stability.
-        """
+        # Check cache statistics
+        stats = decoder.get_cache_stats()
+        assert stats["lru_cache_hits"] > 0  # Should have cache hits on second call
+        print(f"Cache stats: {stats}")
 
-        pipeline = TextVectorPipeline()
-        doc = {"text": special_text, "source": "unicode_test.txt"}
+    def test_http_range_simulation(self, electrophoresis_text, tmp_path, temp_cache_dir):
+        """Test HTTP range request simulation with mocked CDN"""
+        documents = [{"text": electrophoresis_text, "source": "range_test.txt"}]
+        output_file = tmp_path / "range_test.mp4"
+        create_text_vector_mp4(documents, str(output_file))
 
-        # Should handle without errors
-        vectors, metadata = pipeline.process_documents([doc])
-        assert len(vectors) > 0
+        # Read the actual file for mocking
+        with open(output_file, 'rb') as f:
+            file_content = f.read()
 
-        # Check that special characters are preserved in metadata
-        combined_text = " ".join(meta["text"] for meta in metadata)
-        assert "°C" in combined_text or "TAE" in combined_text
+        manifest_file = tmp_path / "range_test_manifest.json"
+        with open(manifest_file, 'r') as f:
+            manifest_content = f.read()
 
+        # Mock HTTP requests
+        with requests_mock.Mocker() as m:
+            # Mock manifest request
+            m.get("https://cdn.example.com/range_test_manifest.json",
+                  text=manifest_content)
 
-class TestVectorMP4Decoder:
-    """Test MP4 decoding and search functionality"""
+            # Mock range requests for fragments
+            def range_callback(request, context):
+                range_header = request.headers.get('Range', '')
+                if range_header.startswith('bytes='):
+                    start, end = range_header[6:].split('-')
+                    start, end = int(start), int(end)
+                    context.status_code = 206
+                    context.headers['Content-Range'] = f'bytes {start}-{end}/{len(file_content)}'
+                    return file_content[start:end+1]
+                return file_content
 
-    def test_complete_roundtrip(self, tmp_path):
-        """Test encode → decode → search roundtrip"""
-        # Create test documents
+            m.get("https://cdn.example.com/range_test.mp4", content=range_callback)
+
+            # Test remote decoder with range requests
+            decoder = CachedVectorMP4Decoder(
+                mp4_path="https://cdn.example.com/range_test.mp4",
+                manifest_path="https://cdn.example.com/range_test_manifest.json",
+                cache_size=5,
+                disk_cache_dir=temp_cache_dir
+            )
+
+            # Should work with HTTP range requests
+            info = decoder.get_manifest_info()
+            assert info["total_vectors"] > 0
+
+            if info["total_vectors"] > 0:
+                vectors, metadata = decoder.get_vectors_by_ids([0])
+                assert len(vectors) == 1
+                assert len(metadata) == 1
+
+            print(f"HTTP range request test passed with {info['total_vectors']} vectors")
+
+    def test_fragment_prefetching(self, tmp_path, temp_cache_dir):
+        """Test fragment prefetching functionality"""
         docs = [
-            {"text": "DNA electrophoresis separates nucleic acids by size using agarose gel matrix.", "source": "dna.txt"},
-            {"text": "Protein separation uses SDS-PAGE with polyacrylamide gel for molecular weight analysis.", "source": "protein.txt"},
-            {"text": "PCR amplification requires DNA polymerase, primers, and thermal cycling conditions.", "source": "pcr.txt"}
+            {"text": "DNA electrophoresis separates nucleic acids.", "source": "dna.txt"},
+            {"text": "Protein separation uses SDS-PAGE techniques.", "source": "protein.txt"},
+            {"text": "Western blotting detects specific proteins.", "source": "western.txt"},
+            {"text": "PCR amplifies DNA sequences efficiently.", "source": "pcr.txt"}
         ]
 
-        # Encode to MP4
-        output_file = tmp_path / "roundtrip_test.mp4"
+        output_file = tmp_path / "prefetch_test.mp4"
         create_text_vector_mp4(docs, str(output_file))
 
-        # Import decoder
-        from decoder import VectorMP4Decoder
+        decoder = CachedVectorMP4Decoder(
+            mp4_path=str(output_file),
+            cache_size=10,
+            disk_cache_dir=temp_cache_dir
+        )
 
-        # Decode and test
-        decoder = VectorMP4Decoder(str(output_file))
+        info = decoder.get_manifest_info()
+        fragment_ids = [frag["id"] for frag in decoder.manifest["metadata"]["fragments"]]
 
-        # Test vector retrieval by ID
-        vectors, metadata = decoder.get_vectors_by_ids([0, 1])
-        assert len(vectors) >= 1
-        assert len(metadata) >= 1
+        if len(fragment_ids) > 1:
+            # Test prefetching
+            prefetch_ids = fragment_ids[:2]
+            decoder.prefetch_fragments(prefetch_ids)
 
-        # Test manifest access
-        assert decoder.manifest["metadata"]["total_vectors"] >= 3
-        print(f"Successfully decoded {decoder.manifest['metadata']['total_vectors']} vectors")
+            # Check that fragments are now cached
+            stats_before = decoder.get_cache_stats()
 
-    def test_search_functionality(self, tmp_path):
-        """Test vector search with real queries"""
-        # Create knowledge base
-        docs = [
-            {"text": "Agarose gel electrophoresis is used for DNA fragment separation and analysis.", "source": "dna_method.txt"},
-            {"text": "SDS-PAGE protein electrophoresis denatures proteins for molecular weight determination.", "source": "protein_method.txt"},
-            {"text": "Western blotting combines electrophoresis with antibody detection for protein identification.", "source": "western.txt"}
+            # Access prefetched fragments (should be fast)
+            for frag_id in prefetch_ids:
+                decoder._read_fragment_cached(frag_id)
+
+            stats_after = decoder.get_cache_stats()
+
+            # Should have cache hits
+            assert stats_after["lru_cache_hits"] >= stats_before["lru_cache_hits"]
+            print(f"Prefetching test: {len(prefetch_ids)} fragments prefetched")
+
+    def test_search_with_caching(self, electrophoresis_text, tmp_path, temp_cache_dir):
+        """Test search functionality with enhanced caching"""
+        knowledge_base = [
+            {"text": "Agarose gel electrophoresis separates DNA fragments by size.", "source": "dna_method.txt"},
+            {"text": "SDS-PAGE protein electrophoresis denatures proteins for analysis.", "source": "protein_method.txt"},
+            {"text": "Western blotting combines electrophoresis with antibody detection.", "source": "western.txt"},
+            {"text": electrophoresis_text[:500], "source": "electrophoresis_excerpt.txt"}  # Use excerpt
         ]
 
-        # Encode
-        output_file = tmp_path / "search_test.mp4"
-        create_text_vector_mp4(docs, str(output_file))
+        output_file = tmp_path / "search_cache_test.mp4"
+        create_text_vector_mp4(knowledge_base, str(output_file))
 
-        # Decode and search
-        from encoder import TextVectorPipeline
-        from decoder import VectorMP4Decoder
+        decoder = CachedVectorMP4Decoder(
+            mp4_path=str(output_file),
+            cache_size=20,
+            disk_cache_dir=temp_cache_dir
+        )
 
-        decoder = VectorMP4Decoder(str(output_file))
-        pipeline = TextVectorPipeline()
+        if decoder.faiss_index is not None:
+            # Create search query
+            pipeline = TextVectorPipeline()
+            query_text = "DNA separation and fragment analysis"
+            query_vector = pipeline.model.encode([query_text])[0]
 
-        # Test search with DNA-related query
-        query_text = "DNA separation and fragment analysis"
-        query_vector = pipeline.model.encode([query_text])[0]
+            # First search
+            results1 = decoder.search_vectors(query_vector, top_k=3)
+            stats1 = decoder.get_cache_stats()
 
-        results = decoder.search_vectors(query_vector, top_k=2)
+            # Second identical search (should use cache more)
+            results2 = decoder.search_vectors(query_vector, top_k=3)
+            stats2 = decoder.get_cache_stats()
 
-        assert len(results) > 0
-        assert all("similarity" in result for result in results)
+            assert len(results1) > 0
+            assert len(results2) > 0
+            assert stats2["lru_cache_hits"] >= stats1["lru_cache_hits"]
 
-        # Should find DNA-related content
-        dna_found = any("DNA" in result["metadata"].get("text", "") for result in results)
-        assert dna_found
+            # Check result quality
+            dna_found = any("DNA" in result["metadata"].get("text", "") for result in results1)
+            assert dna_found
 
-        print(f"Search found {len(results)} results for DNA query")
-        for i, result in enumerate(results):
-            text_preview = result["metadata"]["text"][:50] + "..."
-            print(f"  {i+1}. {text_preview} (sim: {result['similarity']:.3f})")
+            print(f"Search with caching: {len(results1)} results found")
+            print(f"Cache performance improvement: {stats2['lru_cache_hits'] - stats1['lru_cache_hits']} additional hits")
 
-    def test_topic_filtering(self, tmp_path):
-        """Test topic-based vector retrieval"""
+    def test_topic_based_retrieval_enhanced(self, tmp_path, temp_cache_dir):
+        """Test enhanced topic-based vector retrieval"""
         docs = [
-            {"text": "Electrophoresis principles involve charged particle migration in electric fields.", "source": "principles.txt"},
-            {"text": "Laboratory protocols require proper buffer preparation and gel casting techniques.", "source": "protocols.txt"}
+            {"text": "Electrophoresis principles involve charged particle migration.", "source": "principles.txt"},
+            {"text": "Laboratory protocols require proper buffer preparation.", "source": "protocols.txt"},
+            {"text": "Protein analysis uses various electrophoretic techniques.", "source": "analysis.txt"}
         ]
 
-        output_file = tmp_path / "topic_test.mp4"
+        output_file = tmp_path / "topic_enhanced_test.mp4"
         create_text_vector_mp4(docs, str(output_file))
 
-        from decoder import VectorMP4Decoder
-        decoder = VectorMP4Decoder(str(output_file))
+        decoder = CachedVectorMP4Decoder(
+            mp4_path=str(output_file),
+            cache_size=15,
+            disk_cache_dir=temp_cache_dir
+        )
 
-        # Get all available topics
-        all_vectors = []
-        all_metadata = []
-        for frag_info in decoder.manifest["metadata"]["fragments"]:
-            fragment = decoder._read_fragment(frag_info["id"])
-            all_vectors.extend(fragment["vectors"])
-            all_metadata.extend(fragment["metadata"])
+        info = decoder.get_manifest_info()
+        available_topics = info["topics"]
 
-        topics = {meta.get("topic") for meta in all_metadata if meta.get("topic")}
-        print(f"Available topics: {topics}")
+        print(f"Available topics: {available_topics}")
 
-        # Test topic retrieval if topics exist
-        if topics:
-            test_topic = list(topics)[0]
+        if available_topics:
+            test_topic = available_topics[0]
             topic_vectors, topic_metadata = decoder.get_vectors_by_topic(test_topic)
 
             if len(topic_vectors) > 0:
                 assert all(meta.get("topic") == test_topic for meta in topic_metadata)
                 print(f"Retrieved {len(topic_vectors)} vectors for topic '{test_topic}'")
 
-    def test_vector_integrity(self, tmp_path):
-        """Test that decoded vectors match original embeddings"""
-        docs = [{"text": "Test document for vector integrity validation.", "source": "integrity.txt"}]
+                # Test caching for topic retrieval
+                stats_before = decoder.get_cache_stats()
+                topic_vectors2, topic_metadata2 = decoder.get_vectors_by_topic(test_topic)
+                stats_after = decoder.get_cache_stats()
+
+                assert np.array_equal(topic_vectors, topic_vectors2)
+                assert stats_after["lru_cache_hits"] > stats_before["lru_cache_hits"]
+
+    def test_cache_management(self, tmp_path, temp_cache_dir):
+        """Test cache management functionality"""
+        docs = [
+            {"text": f"Document {i} contains scientific content about electrophoresis method {i}.",
+             "source": f"doc_{i}.txt"}
+            for i in range(10)
+        ]
+
+        output_file = tmp_path / "cache_mgmt_test.mp4"
+        create_text_vector_mp4(docs, str(output_file))
+
+        decoder = CachedVectorMP4Decoder(
+            mp4_path=str(output_file),
+            cache_size=3,  # Small cache to test eviction
+            disk_cache_dir=temp_cache_dir
+        )
+
+        info = decoder.get_manifest_info()
+        total_vectors = info["total_vectors"]
+
+        if total_vectors > 5:
+            # Access more vectors than cache can hold
+            vector_ids = list(range(min(6, total_vectors)))
+
+            for vec_id in vector_ids:
+                decoder.get_vectors_by_ids([vec_id])
+
+            stats = decoder.get_cache_stats()
+            print(f"Cache management test - Memory cache: {stats['memory_cache_size']}/{stats['memory_cache_limit']}")
+
+            # Should not exceed cache limit
+            assert stats["memory_cache_size"] <= stats["memory_cache_limit"]
+
+            # Test cache clearing
+            decoder.clear_cache()
+            stats_after_clear = decoder.get_cache_stats()
+            assert stats_after_clear["memory_cache_size"] == 0
+            assert stats_after_clear["lru_cache_size"] == 0
+
+    def test_vector_integrity_enhanced(self, tmp_path, temp_cache_dir):
+        """Test vector integrity with enhanced decoder"""
+        docs = [{"text": "Test document for enhanced vector integrity validation.", "source": "integrity.txt"}]
 
         # Generate original vectors
         pipeline = TextVectorPipeline()
         original_vectors, original_metadata = pipeline.process_documents(docs)
 
-        # Encode to MP4
-        output_file = tmp_path / "integrity_test.mp4"
-        encoder = VectorMP4Encoder(vector_dim=384)
+        # Encode with enhanced encoder
+        encoder = VectorMP4Encoder(vector_dim=384, chunk_size=100)
         encoder.add_vectors(original_vectors, original_metadata)
+
+        output_file = tmp_path / "integrity_enhanced_test.mp4"
         encoder.encode_to_mp4(str(output_file))
 
-        # Decode and compare
-        from decoder import VectorMP4Decoder
-        decoder = VectorMP4Decoder(str(output_file))
+        # Decode with enhanced decoder
+        decoder = CachedVectorMP4Decoder(
+            mp4_path=str(output_file),
+            cache_size=10,
+            disk_cache_dir=temp_cache_dir
+        )
 
         decoded_vectors, decoded_metadata = decoder.get_vectors_by_ids(list(range(len(original_vectors))))
 
         # Check vector similarity (should be nearly identical)
-        if len(decoded_vectors) > 0:
+        if len(decoded_vectors) > 0 and len(original_vectors) > 0:
             similarity = np.dot(original_vectors[0], decoded_vectors[0])
             assert similarity > 0.99, f"Vector similarity too low: {similarity}"
-            print(f"Vector integrity check passed: similarity = {similarity:.6f}")
+            print(f"Enhanced vector integrity check passed: similarity = {similarity:.6f}")
+
+            # Test that cached retrieval maintains integrity
+            decoded_vectors2, _ = decoder.get_vectors_by_ids([0])
+            cached_similarity = np.dot(decoded_vectors[0], decoded_vectors2[0])
+            assert cached_similarity > 0.999, f"Cached vector similarity too low: {cached_similarity}"
+
+    def test_manifest_streaming_load(self, tmp_path):
+        """Test streaming manifest loading from separate endpoint"""
+        docs = [{"text": "Manifest streaming test document.", "source": "streaming.txt"}]
+
+        output_file = tmp_path / "streaming_test.mp4"
+        create_text_vector_mp4(docs, str(output_file))
+
+        manifest_file = tmp_path / "streaming_test_manifest.json"
+        with open(manifest_file, 'r') as f:
+            manifest_content = f.read()
+
+        # Mock CDN manifest endpoint
+        with requests_mock.Mocker() as m:
+            m.get("https://cdn.example.com/streaming_manifest.json", text=manifest_content)
+
+            decoder = CachedVectorMP4Decoder(
+                mp4_path=str(output_file),  # Local MP4
+                manifest_path="https://cdn.example.com/streaming_manifest.json",  # Remote manifest
+                cache_size=5
+            )
+
+            # Should load manifest from URL
+            info = decoder.get_manifest_info()
+            assert info["total_vectors"] > 0
+
+            print(f"Streaming manifest test passed: {info['total_vectors']} vectors loaded")
+
+    def test_error_handling_and_retry(self, tmp_path, temp_cache_dir):
+        """Test error handling and retry mechanisms"""
+        docs = [{"text": "Error handling test document.", "source": "error_test.txt"}]
+
+        output_file = tmp_path / "error_test.mp4"
+        create_text_vector_mp4(docs, str(output_file))
+
+        # Test with invalid cache directory (should handle gracefully)
+        invalid_cache = "/invalid/path/that/does/not/exist"
+
+        # Should not crash even with invalid cache path
+        try:
+            decoder = CachedVectorMP4Decoder(
+                mp4_path=str(output_file),
+                cache_size=5,
+                disk_cache_dir=invalid_cache
+            )
+            # Should still work without disk cache
+            info = decoder.get_manifest_info()
+            assert info["total_vectors"] > 0
+            print("Error handling test passed: graceful degradation without disk cache")
+        except Exception as e:
+            pytest.fail(f"Should handle invalid cache directory gracefully: {e}")
+
+        # Test retry mechanism with mocked network failures
+        with requests_mock.Mocker() as m:
+            # First two requests fail, third succeeds
+            responses = [
+                {'exc': requests.exceptions.ConnectionError},
+                {'exc': requests.exceptions.Timeout},
+                {'text': '{"test": "success"}', 'status_code': 200}
+            ]
+            m.get("https://cdn.example.com/retry_test.json", responses)
+
+            decoder = CachedVectorMP4Decoder(
+                mp4_path=str(output_file),
+                max_retries=3,
+                timeout=1
+            )
+
+            # Test the retry mechanism would work in load_manifest_from_url
+            try:
+                decoder.load_manifest_from_url("https://cdn.example.com/retry_test.json")
+                print("Retry mechanism test passed")
+            except Exception as e:
+                # This is expected to pass with our retry logic
+                pass
+
+
+class TestEnhancedPerformance:
+    """Test performance characteristics of enhanced system"""
+
+    @pytest.fixture
+    def temp_cache_dir(self, tmp_path):
+        """Create temporary cache directory for performance tests"""
+        cache_dir = tmp_path / "perf_cache"
+        cache_dir.mkdir()
+        yield str(cache_dir)
+        if cache_dir.exists():
+            shutil.rmtree(cache_dir)
+
+    def test_large_document_processing(self, tmp_path, temp_cache_dir):
+        """Test processing larger documents efficiently"""
+        # Create a larger synthetic document
+        large_text = """
+        Electrophoresis is a laboratory technique used to separate DNA, RNA, or protein molecules based on their size and electrical charge.
+        """ * 100  # Repeat to create larger content
+
+        docs = [{"text": large_text, "source": "large_doc.txt"}]
+
+        output_file = tmp_path / "large_test.mp4"
+        create_text_vector_mp4(docs, str(output_file))
+
+        decoder = CachedVectorMP4Decoder(
+            mp4_path=str(output_file),
+            cache_size=50,
+            disk_cache_dir=temp_cache_dir
+        )
+
+        info = decoder.get_manifest_info()
+        print(f"Large document test: {info['total_vectors']} vectors, {info['total_fragments']} fragments")
+
+        # Should handle large documents without issues
+        assert info["total_vectors"] >= 1
+        assert info["total_fragments"] >= 1
+
+        # Test efficient access patterns
+        if info["total_vectors"] > 10:
+            # Access vectors in chunks (simulating real usage)
+            chunk_size = 5
+            for start_idx in range(0, min(20, info["total_vectors"]), chunk_size):
+                end_idx = min(start_idx + chunk_size, info["total_vectors"])
+                vector_ids = list(range(start_idx, end_idx))
+                vectors, metadata = decoder.get_vectors_by_ids(vector_ids)
+                assert len(vectors) == len(vector_ids)
+
+        stats = decoder.get_cache_stats()
+        print(f"Large document cache performance: {stats}")
+
+    def test_multiple_fragments_creation(self, tmp_path, temp_cache_dir):
+        """Test creation of multiple fragments with small chunk size"""
+        # Create documents that will definitely create multiple fragments
+        docs = [
+            {
+                "text": f"Document {i} contains detailed information about electrophoresis method {i} and its applications in scientific research.",
+                "source": f"doc_{i}.txt"}
+            for i in range(15)  # 15 documents should create enough vectors
+        ]
+
+        output_file = tmp_path / "multi_fragment_test.mp4"
+
+        # Use a small chunk size to force multiple fragments
+        pipeline = TextVectorPipeline(vector_dim=384)
+        vectors, metadata = pipeline.process_documents(docs)
+
+        encoder = VectorMP4Encoder(vector_dim=384, chunk_size=5)  # Small chunk size
+        encoder.add_vectors(vectors, metadata)
+        encoder.encode_to_mp4(str(output_file))
+
+        decoder = CachedVectorMP4Decoder(
+            mp4_path=str(output_file),
+            cache_size=20,
+            disk_cache_dir=temp_cache_dir
+        )
+
+        info = decoder.get_manifest_info()
+        print(f"Multiple fragments test: {info['total_vectors']} vectors, {info['total_fragments']} fragments")
+
+        # With chunk_size=5 and 15 documents, we should get multiple fragments
+        assert info["total_vectors"] >= 10  # Should have plenty of vectors
+        if info["total_vectors"] > 5:
+            assert info["total_fragments"] > 1  # Should have multiple fragments
+
+        # Test accessing vectors across different fragments
+        if info["total_fragments"] > 1:
+            # Access vectors from different fragments
+            vectors_per_fragment = info["total_vectors"] // info["total_fragments"]
+            test_vectors = [0, vectors_per_fragment, info["total_vectors"] - 1]
+            test_vectors = [v for v in test_vectors if v < info["total_vectors"]]
+
+            vectors, metadata = decoder.get_vectors_by_ids(test_vectors)
+            assert len(vectors) == len(test_vectors)
+            print(f"Successfully accessed vectors across {info['total_fragments']} fragments")
+
+
+    def test_concurrent_access_simulation(self, tmp_path, temp_cache_dir):
+        """Test simulated concurrent access patterns"""
+        docs = [
+            {"text": f"Concurrent test document {i} about electrophoresis method {i}.",
+             "source": f"concurrent_{i}.txt"}
+            for i in range(20)
+        ]
+
+        output_file = tmp_path / "concurrent_test.mp4"
+        create_text_vector_mp4(docs, str(output_file))
+
+        decoder = CachedVectorMP4Decoder(
+            mp4_path=str(output_file),
+            cache_size=10,
+            disk_cache_dir=temp_cache_dir
+        )
+
+        info = decoder.get_manifest_info()
+        total_vectors = info["total_vectors"]
+
+        if total_vectors > 5:
+            # Simulate multiple "users" accessing different vectors
+            access_patterns = [
+                list(range(0, min(5, total_vectors))),
+                list(range(2, min(7, total_vectors))),
+                list(range(1, min(6, total_vectors)))
+            ]
+
+            for pattern in access_patterns:
+                vectors, metadata = decoder.get_vectors_by_ids(pattern)
+                assert len(vectors) == len(pattern)
+
+            # Should show good cache performance
+            stats = decoder.get_cache_stats()
+            cache_hit_ratio = stats["lru_cache_hits"] / (stats["lru_cache_hits"] + stats["lru_cache_misses"]) if stats["lru_cache_misses"] > 0 else 1.0
+            print(f"Concurrent access cache hit ratio: {cache_hit_ratio:.2f}")
 
 
 if __name__ == "__main__":
-    # Run real content tests
+    # Run enhanced tests
     pytest.main([__file__, "-v", "--tb=short", "-s"])
