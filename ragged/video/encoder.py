@@ -60,12 +60,10 @@ class TextVectorPipeline:
 
     def _extract_topic(self, text: str) -> Optional[str]:
         """Extract topic from text using simple keyword analysis"""
-        # Simple topic extraction - you might want to use a more sophisticated method
         words = re.findall(r'\b[a-zA-Z]{4,}\b', text.lower())
         if not words:
             return None
 
-        # Return most frequent longer word as topic
         word_freq = {}
         for word in words:
             word_freq[word] = word_freq.get(word, 0) + 1
@@ -75,13 +73,7 @@ class TextVectorPipeline:
         return None
 
     def chunk_text(self, text: str, source: str = "unknown") -> List[TextChunk]:
-        """
-        Split text into overlapping chunks based on token count
-
-        Think of this like cutting a long rope into manageable pieces with some overlap
-        so you don't lose context at the boundaries.
-        """
-        # Split into sentences first to maintain coherence
+        """Split text into overlapping chunks based on token count"""
         sentences = re.split(r'(?<=[.!?])\s+', text)
 
         chunks = []
@@ -92,7 +84,6 @@ class TextVectorPipeline:
         for sentence in sentences:
             sentence_tokens = self._count_tokens(sentence)
 
-            # If adding this sentence would exceed chunk size, finalize current chunk
             if current_tokens + sentence_tokens > self.chunk_size and current_chunk:
                 chunk = TextChunk(
                     text=current_chunk.strip(),
@@ -105,20 +96,17 @@ class TextVectorPipeline:
                 )
                 chunks.append(chunk)
 
-                # Start new chunk with overlap
                 overlap_text = self._get_overlap_text(current_chunk, self.chunk_overlap)
                 current_chunk = overlap_text + " " + sentence
                 current_tokens = self._count_tokens(current_chunk)
                 chunk_id += 1
             else:
-                # Add sentence to current chunk
                 if current_chunk:
                     current_chunk += " " + sentence
                 else:
                     current_chunk = sentence
                 current_tokens += sentence_tokens
 
-        # Don't forget the last chunk
         if current_chunk.strip():
             chunk = TextChunk(
                 text=current_chunk.strip(),
@@ -143,25 +131,17 @@ class TextVectorPipeline:
         return self.encoder.decode(overlap_token_ids)
 
     def encode_chunks(self, chunks: List[TextChunk]) -> Tuple[np.ndarray, List[Dict]]:
-        """
-        Convert text chunks to vectors using the embedding model
-
-        This is like translating text into a mathematical language that computers
-        can understand and compare efficiently.
-        """
+        """Convert text chunks to vectors using the embedding model"""
         if not chunks:
             return np.array([]), []
 
-        # Extract text for encoding
         texts = [chunk.text for chunk in chunks]
 
-        # Generate embeddings
         print(f"Encoding {len(texts)} text chunks...")
         vectors = self.model.encode(texts,
                                     show_progress_bar=True,
                                     convert_to_numpy=True)
 
-        # Create metadata for each vector
         metadata = []
         for chunk in chunks:
             meta = {
@@ -179,15 +159,7 @@ class TextVectorPipeline:
         return vectors, metadata
 
     def process_documents(self, documents: List[Dict[str, str]]) -> Tuple[np.ndarray, List[Dict]]:
-        """
-        Process multiple documents into vectors
-
-        Args:
-            documents: List of dicts with 'text' and 'source' keys
-
-        Returns:
-            Tuple of (vectors, metadata)
-        """
+        """Process multiple documents into vectors"""
         all_chunks = []
 
         for doc in documents:
@@ -203,15 +175,7 @@ class TextVectorPipeline:
         return self.encode_chunks(all_chunks)
 
     def process_text_files(self, file_paths: List[str]) -> Tuple[np.ndarray, List[Dict]]:
-        """
-        Process text files directly
-
-        Args:
-            file_paths: List of paths to text files
-
-        Returns:
-            Tuple of (vectors, metadata)
-        """
+        """Process text files directly"""
         documents = []
 
         for file_path in file_paths:
@@ -230,7 +194,7 @@ class TextVectorPipeline:
 
 
 class VectorMP4Encoder:
-    """Encodes vectors into MP4 custom tracks for CDN distribution"""
+    """Enhanced encoder with CDN optimization features"""
 
     def __init__(self, vector_dim: int = 384, chunk_size: int = 1000):
         self.vector_dim = vector_dim
@@ -238,13 +202,24 @@ class VectorMP4Encoder:
         self.fragments = []
         self.faiss_index = None
         self.all_vectors = []
+        self.current_byte_position = 0
         self.manifest = {
             "metadata": {
                 "vector_dim": vector_dim,
                 "chunk_size": chunk_size,
                 "total_vectors": 0,
                 "fragments": [],
-                "faiss_index_type": "IndexFlatIP"
+                "faiss_index_type": "IndexFlatIP",
+                "file_structure": {
+                    "ftyp_start": 0,
+                    "ftyp_size": 0,
+                    "video_track_start": 0,
+                    "video_track_size": 0,
+                    "manifest_start": 0,
+                    "manifest_size": 0,
+                    "fragments_start": 0,
+                    "total_file_size": 0
+                }
             },
             "vector_map": {}
         }
@@ -282,7 +257,15 @@ class VectorMP4Encoder:
                 "vector_count": len(chunk_vectors),
                 "start_idx": start_vector_id,
                 "end_idx": end_vector_id,
-                "topics": list(set([m.get("topic", "") for m in chunk_metadata if m.get("topic")]))
+                "topics": list(set([m.get("topic", "") for m in chunk_metadata if m.get("topic")])),
+                # Byte positions will be filled during encoding
+                "byte_start": 0,
+                "byte_end": 0,
+                "byte_size": 0,
+                "moof_start": 0,
+                "mdat_start": 0,
+                "data_start": 0,
+                "data_size": 0
             }
             self.manifest["metadata"]["fragments"].append(frag_info)
 
@@ -422,38 +405,145 @@ class VectorMP4Encoder:
         return struct.pack('>I', size) + box_type.encode('ascii') + data
 
     def encode_to_mp4(self, output_path: str):
-        """Encode vectors to MP4 file with custom tracks"""
+        """Enhanced encode to MP4 with precise byte tracking"""
         print("Building Faiss index...")
         self.faiss_index = self._build_faiss_index()
 
+        # Create all components first to calculate sizes
         ftyp_data = b'isom' + struct.pack('>I', 512) + b'isommp41avc1'
         ftyp_box = self._create_mp4_box('ftyp', ftyp_data)
 
         video_boxes = self._create_video_boxes()
 
-        manifest_data = json.dumps(self.manifest, indent=2).encode('utf-8')
-        manifest_box = self._create_mp4_box('manf', manifest_data)
-
+        # Serialize all fragments first to get accurate sizes
+        serialized_fragments = []
         fragment_boxes = []
-        for fragment in self.fragments:
+
+        for i, fragment in enumerate(self.fragments):
             fragment_data = self._serialize_fragment(fragment)
             moof_header = struct.pack('>II', fragment["id"], fragment["vector_count"])
             moof_box = self._create_mp4_box('moof', moof_header)
             mdat_box = self._create_mp4_box('mdat', fragment_data)
+
+            serialized_fragments.append({
+                'moof': moof_box,
+                'mdat': mdat_box,
+                'data': fragment_data
+            })
             fragment_boxes.extend([moof_box, mdat_box])
 
-        with open(output_path, 'wb') as f:
-            f.write(ftyp_box)
-            for box in video_boxes:
-                f.write(box)
-            f.write(manifest_box)
-            for box in fragment_boxes:
-                f.write(box)
+        # Update manifest with calculated byte positions
+        self.current_byte_position = 0
 
+        # FTYP box
+        self.manifest["metadata"]["file_structure"]["ftyp_start"] = self.current_byte_position
+        self.manifest["metadata"]["file_structure"]["ftyp_size"] = len(ftyp_box)
+        self.current_byte_position += len(ftyp_box)
+
+        # Video track boxes
+        self.manifest["metadata"]["file_structure"]["video_track_start"] = self.current_byte_position
+        video_track_size = sum(len(box) for box in video_boxes)
+        self.manifest["metadata"]["file_structure"]["video_track_size"] = video_track_size
+        self.current_byte_position += video_track_size
+
+        # Manifest box (we'll update this after creating it)
+        manifest_start = self.current_byte_position
+
+        # Calculate fragments start position (after manifest)
+        # We need to estimate manifest size first
+        temp_manifest_data = json.dumps(self.manifest, indent=2).encode('utf-8')
+        estimated_manifest_box = self._create_mp4_box('manf', temp_manifest_data)
+        manifest_size = len(estimated_manifest_box)
+
+        self.manifest["metadata"]["file_structure"]["manifest_start"] = manifest_start
+        self.manifest["metadata"]["file_structure"]["manifest_size"] = manifest_size
+        self.current_byte_position += manifest_size
+
+        # Fragments start
+        self.manifest["metadata"]["file_structure"]["fragments_start"] = self.current_byte_position
+
+        # Update fragment byte positions
+        for i, serialized_frag in enumerate(serialized_fragments):
+            fragment_start = self.current_byte_position
+            moof_size = len(serialized_frag['moof'])
+            mdat_size = len(serialized_frag['mdat'])
+            data_size = len(serialized_frag['data'])
+
+            self.manifest["metadata"]["fragments"][i].update({
+                "byte_start": fragment_start,
+                "byte_end": fragment_start + moof_size + mdat_size,
+                "byte_size": moof_size + mdat_size,
+                "moof_start": fragment_start,
+                "mdat_start": fragment_start + moof_size,
+                "data_start": fragment_start + moof_size + 8,  # Skip mdat header (8 bytes)
+                "data_size": data_size
+            })
+
+            self.current_byte_position += moof_size + mdat_size
+
+        # Final file size
+        self.manifest["metadata"]["file_structure"]["total_file_size"] = self.current_byte_position
+
+        # Create final manifest with accurate byte positions
+        final_manifest_data = json.dumps(self.manifest, indent=2).encode('utf-8')
+        manifest_box = self._create_mp4_box('manf', final_manifest_data)
+
+        # Write the complete MP4 file
+        with open(output_path, 'wb') as f:
+            # Write in order and track actual positions
+            actual_position = 0
+
+            # FTYP box
+            f.write(ftyp_box)
+            actual_position += len(ftyp_box)
+            print(f"FTYP written: {len(ftyp_box)} bytes, position now: {actual_position}")
+
+            # Video boxes
+            for i, box in enumerate(video_boxes):
+                f.write(box)
+                actual_position += len(box)
+                print(f"Video box {i} written: {len(box)} bytes, position now: {actual_position}")
+
+            # Manifest box
+            f.write(manifest_box)
+            actual_position += len(manifest_box)
+            print(f"Manifest written: {len(manifest_box)} bytes, position now: {actual_position}")
+
+            # Fragment boxes with actual position tracking
+            for i, serialized_frag in enumerate(serialized_fragments):
+                fragment_actual_start = actual_position
+
+                # Write moof
+                f.write(serialized_frag['moof'])
+                actual_position += len(serialized_frag['moof'])
+                mdat_actual_start = actual_position
+
+                # Write mdat
+                f.write(serialized_frag['mdat'])
+                actual_position += len(serialized_frag['mdat'])
+
+                # Update manifest with actual positions
+                self.manifest["metadata"]["fragments"][i].update({
+                    "byte_start": fragment_actual_start,
+                    "byte_end": actual_position,
+                    "moof_start": fragment_actual_start,
+                    "mdat_start": mdat_actual_start,
+                    "data_start": mdat_actual_start + 8,  # Skip mdat header (8 bytes)
+                    "data_size": len(serialized_frag['data'])
+                })
+
+                print(
+                    f"Fragment {i} written: moof at {fragment_actual_start}, mdat at {mdat_actual_start}, data at {mdat_actual_start + 8}, size {len(serialized_frag['data'])}")
+
+        # Update final file size
+        self.manifest["metadata"]["file_structure"]["total_file_size"] = actual_position
+
+        # Save separate manifest file for CDN optimization (with corrected positions)
         manifest_path = output_path.replace('.mp4', '_manifest.json')
         with open(manifest_path, 'w') as f:
             json.dump(self.manifest, f, indent=2)
 
+        # Save Faiss index
         if self.faiss_index:
             faiss_path = output_path.replace('.mp4', '_faiss.index')
             faiss.write_index(self.faiss_index, faiss_path)
@@ -462,23 +552,18 @@ class VectorMP4Encoder:
         print(f"Encoded {self.manifest['metadata']['total_vectors']} vectors to {output_path}")
         print(f"Created {len(self.fragments)} fragments")
         print(f"Manifest saved to {manifest_path}")
+        print(f"File structure:")
+        for key, value in self.manifest["metadata"]["file_structure"].items():
+            print(f"  {key}: {value}")
 
 
 # Example usage
 def create_text_vector_mp4(documents: List[Dict[str, str]], output_path: str):
-    """
-    Complete pipeline: text documents → vectors → MP4
+    """Complete pipeline: text documents → vectors → MP4 with CDN optimizations"""
 
-    Think of this as a factory assembly line:
-    1. Raw text goes in
-    2. Gets chopped into digestible chunks
-    3. Each chunk becomes a vector (mathematical fingerprint)
-    4. Vectors get packaged into an MP4 container for easy distribution
-    """
-
-    # Initialize pipeline with smaller model for faster processing
+    # Initialize pipeline
     pipeline = TextVectorPipeline(
-        model_name="all-MiniLM-L6-v2",  # 384-dimensional vectors
+        model_name="all-MiniLM-L6-v2",
         chunk_size=512,
         chunk_overlap=50,
         vector_dim=384
@@ -491,13 +576,13 @@ def create_text_vector_mp4(documents: List[Dict[str, str]], output_path: str):
         print("No vectors generated from documents")
         return
 
-    # Initialize MP4 encoder with matching vector dimension
+    # Initialize enhanced MP4 encoder
     encoder = VectorMP4Encoder(vector_dim=384, chunk_size=1000)
 
     # Add vectors to encoder
     encoder.add_vectors(vectors, metadata)
 
-    # Encode to MP4
+    # Encode to MP4 with byte tracking
     encoder.encode_to_mp4(output_path)
 
 
