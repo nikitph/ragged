@@ -289,7 +289,7 @@ class VectorMP4Encoder:
 
         faiss.normalize_L2(vectors_array)
 
-        if n_vectors < 10000:
+        if n_vectors < 100000:
             print(f"Using IndexFlatIP for {n_vectors} vectors")
             index = faiss.IndexFlatIP(self.vector_dim)
             index.add(vectors_array)
