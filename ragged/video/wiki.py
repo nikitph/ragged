@@ -7,7 +7,7 @@ from tqdm import tqdm
 import time
 
 from ragged.video import VectorMP4Encoder
-from ragged.video.encoder import TextVectorPipeline
+from ragged.services.text_processing import TextVectorPipeline
 
 
 # Import your existing classes (assuming they're in the same file or imported)
