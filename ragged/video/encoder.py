@@ -7,7 +7,7 @@ from typing import Dict, List, Any, Optional
 from .mp4_structure import create_mp4_box, create_video_boxes
 
 
-class VectorMP4Encoder:
+class Encoder:
     """Handles final MP4 file assembly and writing with byte position tracking"""
 
     def assemble_mp4(self,
