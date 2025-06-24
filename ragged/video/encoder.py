@@ -11,6 +11,8 @@ from dataclasses import dataclass
 import re
 from datetime import datetime
 
+from ragged.services.uploader.r2_uploader import UploadServiceBuilder, R2Config
+
 
 @dataclass
 class TextChunk:
@@ -555,6 +557,13 @@ class VectorMP4Encoder:
         print(f"File structure:")
         for key, value in self.manifest["metadata"]["file_structure"].items():
             print(f"  {key}: {value}")
+
+    def encode_and_upload(self, output_path: str):
+        # Existing encoding logic
+        self.encode_to_mp4(output_path)
+
+        upload_service = UploadServiceBuilder.build()
+        upload_service.execute_upload(output_path)
 
 
 # Example usage
