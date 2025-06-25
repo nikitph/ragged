@@ -93,7 +93,7 @@ def create_wikipedia_mp4(
         model_name: str,
         chunk_size: int,
         chunk_overlap: int,
-        n_clusters: int
+        n_clusters_per_doc: int
 ):
     """
     Complete pipeline: Wikipedia -> Vectors -> Clustered MP4.
@@ -127,11 +127,11 @@ def create_wikipedia_mp4(
         model_name=model_name,
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
-        n_clusters=n_clusters
+        n_clusters_per_doc=n_clusters_per_doc
     )
 
     # Execute the entire pipeline with one call
-    manager.run(documents, output_path)
+    manager.run_hierarchical(documents, output_path)
 
     pipeline_time = time.time() - pipeline_start_time
     total_time = time.time() - start_time
@@ -192,8 +192,13 @@ Examples:
     # --- Arguments for the new architecture ---
     parser.add_argument("--chunk-size", type=int, default=512, help="Text chunk size in tokens")
     parser.add_argument("--chunk-overlap", type=int, default=50, help="Overlap between chunks in tokens")
-    parser.add_argument("--n-clusters", type=int, default=100,
-                        help="Number of semantic clusters (MP4 fragments) to create")
+    parser.add_argument(
+        "--clusters-per-doc",
+        type=int,
+        default=5,
+        dest="n_clusters_per_doc",  # Store in n_clusters_per_doc
+        help="Number of sub-topic clusters to find within each article (for IVFPQ index)."
+    )
 
     args = parser.parse_args()
 
@@ -206,7 +211,7 @@ Examples:
             model_name=args.model,
             chunk_size=args.chunk_size,
             chunk_overlap=args.chunk_overlap,
-            n_clusters=args.n_clusters  # Pass the new argument
+            n_clusters_per_doc=args.n_clusters_per_doc  # Pass the new argument
         )
     except KeyboardInterrupt:
         print("\n⏹️  Process interrupted by user.")

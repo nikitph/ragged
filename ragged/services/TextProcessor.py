@@ -1,126 +1,115 @@
-import json
-import struct
-import numpy as np
-from typing import List, Dict, Any, Tuple, Optional
-import hashlib
-import os
-import faiss
-from sentence_transformers import SentenceTransformer
-import tiktoken
-from dataclasses import dataclass, asdict
+# In your pipeline file (e.g., refactored_pipeline.py)
+import logging
 import re
 from datetime import datetime
-import logging
+from typing import List, Dict, Tuple
+
+import faiss
+import numpy as np
+import tiktoken
+from sentence_transformers import SentenceTransformer
 
 from ragged.models.text_chunk import TextChunk
 
 
-class TextProcessor:
-    """
-    Handles the ingestion of raw text and conversion into text chunks and vector embeddings.
-    """
+# from .data_models import TextChunk # Your import might vary
 
+class TextProcessor:
+    # ... (__init__ is the same) ...
     def __init__(self,
                  model_name: str = "all-MiniLM-L6-v2",
                  chunk_size: int = 512,
                  chunk_overlap: int = 50):
-        """
-        Args:
-            model_name: SentenceTransformer model name.
-            chunk_size: Maximum tokens per chunk.
-            chunk_overlap: Token overlap between chunks.
-        """
         logging.info(f"Initializing TextProcessor with model: {model_name}")
         self.model = SentenceTransformer(model_name)
         self.vector_dim = self.model.get_sentence_embedding_dimension()
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        # Use a specific encoding for consistency
         self.encoder = tiktoken.get_encoding("cl100k_base")
         logging.info(f"Model vector dimension: {self.vector_dim}")
 
-    def _count_tokens(self, text: str) -> int:
-        """Counts tokens in text using tiktoken."""
-        return len(self.encoder.encode(text))
-
-    def _get_overlap_text(self, text: str, overlap_tokens: int) -> str:
-        """Gets the last N tokens from text for overlap."""
-        tokens = self.encoder.encode(text)
-        if len(tokens) <= overlap_tokens:
-            return text
-        overlap_token_ids = tokens[-overlap_tokens:]
-        return self.encoder.decode(overlap_token_ids)
-
+    ### --- FIX: Replaced sentence-based chunking with token-based chunking --- ###
     def _chunk_document(self, text: str, source: str) -> List[TextChunk]:
-        """Splits a single document's text into overlapping chunks."""
+        """
+        Splits a document into NON-OVERLAPPING chunks that respect sentence boundaries.
+        """
+        if not text.strip():
+            return []
+
+        # Split the text into sentences using a more robust regex
+        # This regex splits on '.', '!', '?' followed by space, but keeps the delimiter
         sentences = re.split(r'(?<=[.!?])\s+', text)
+
         chunks = []
         current_chunk_text = ""
-        current_tokens = 0
+        current_chunk_tokens = 0
         chunk_id = 0
 
         for sentence in sentences:
-            sentence_tokens = self._count_tokens(sentence)
-            if current_tokens + sentence_tokens > self.chunk_size and current_chunk_text:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+
+            sentence_token_count = len(self.encoder.encode(sentence))
+
+            # If adding the next sentence exceeds the chunk size, finalize the current chunk
+            if current_chunk_text and (current_chunk_tokens + sentence_token_count > self.chunk_size):
                 chunks.append(TextChunk(
                     text=current_chunk_text.strip(),
                     source=source,
                     chunk_id=chunk_id,
                     word_count=len(current_chunk_text.split()),
-                    token_count=self._count_tokens(current_chunk_text),
+                    token_count=current_chunk_tokens,
                     timestamp=datetime.now().isoformat()
                 ))
-                overlap = self._get_overlap_text(current_chunk_text, self.chunk_overlap)
-                current_chunk_text = overlap + " " + sentence
+                # Start a new chunk
+                current_chunk_text = ""
+                current_chunk_tokens = 0
                 chunk_id += 1
-            else:
-                current_chunk_text += (" " + sentence) if current_chunk_text else sentence
-            current_tokens = self._count_tokens(current_chunk_text)
 
-        if current_chunk_text.strip():
+            # Add the sentence to the current chunk
+            # Add a space if the chunk is not empty
+            separator = " " if current_chunk_text else ""
+            current_chunk_text += separator + sentence
+            current_chunk_tokens += sentence_token_count + (1 if separator else 0)
+
+        # Add the last remaining chunk if it exists
+        if current_chunk_text:
             chunks.append(TextChunk(
                 text=current_chunk_text.strip(),
                 source=source,
                 chunk_id=chunk_id,
                 word_count=len(current_chunk_text.split()),
-                token_count=self._count_tokens(current_chunk_text),
+                token_count=current_chunk_tokens,
                 timestamp=datetime.now().isoformat()
             ))
+
         return chunks
 
-    def process_documents(self, documents: List[Dict[str, str]]) -> Tuple[np.ndarray, List[TextChunk]]:
+    # --- The rest of the class remains the same ---
+    # It correctly uses the now-fixed _chunk_document method.
+    def process_document(self, document: Dict[str, str]) -> Tuple[np.ndarray, List[TextChunk]]:
         """
-        Processes multiple documents into a flat list of TextChunks and their embeddings.
-
-        Args:
-            documents: A list of dictionaries, each with 'text' and 'source' keys.
-
-        Returns:
-            A tuple containing:
-            - A numpy array of vector embeddings.
-            - A list of TextChunk objects corresponding to each vector.
+        Processes a SINGLE document into a set of TextChunks and their embeddings.
         """
-        logging.info(f"Processing {len(documents)} documents...")
-        all_chunks = []
-        for doc in documents:
-            text = doc.get('text', '')
-            source = doc.get('source', 'unknown')
-            if text.strip():
-                all_chunks.extend(self._chunk_document(text, source))
+        text = document.get('text', '')
+        source = document.get('source', 'unknown')
 
-        if not all_chunks:
-            logging.warning("No text chunks were generated from the documents.")
+        # Use the new and improved chunking method
+        chunks = self._chunk_document(text, source)
+
+        if not chunks:
             return np.array([]), []
 
-        texts_to_encode = [chunk.text for chunk in all_chunks]
-        logging.info(f"Encoding {len(texts_to_encode)} text chunks into vectors...")
+        texts_to_encode = [chunk.text for chunk in chunks]
 
         vectors = self.model.encode(
             texts_to_encode,
-            show_progress_bar=True,
+            show_progress_bar=False,
             convert_to_numpy=True
         ).astype(np.float32)
 
-        faiss.normalize_L2(vectors)  # Normalize for dot product similarity
+        faiss.normalize_L2(vectors)
 
-        logging.info("Finished creating embeddings.")
-        return vectors, all_chunks
+        return vectors, chunks

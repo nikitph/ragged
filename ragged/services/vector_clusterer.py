@@ -1,98 +1,71 @@
-import logging
-from typing import List, Dict, Tuple
+# In refactored_pipeline.py, class VectorClusterer
+from typing import Tuple
 
 import faiss
 import numpy as np
 
-from ragged.models.text_chunk import TextChunk
-
 
 class VectorClusterer:
     """
-    Performs K-means clustering and reorders vectors based on cluster
-    and similarity to the cluster's centroid.
+    Performs K-means clustering. This version is adapted to cluster
+    vectors within a single document to find its sub-topics.
     """
 
-    def __init__(self, n_clusters: int):
+    def __init__(self, n_clusters_per_doc: int):
         """
         Args:
-            n_clusters: The number of clusters to form.
+            n_clusters_per_doc: The number of sub-clusters to find within each document.
         """
-        if n_clusters <= 0:
+        if n_clusters_per_doc <= 0:
             raise ValueError("Number of clusters must be greater than 0.")
-        self.n_clusters = n_clusters
+        self.n_clusters_per_doc = n_clusters_per_doc
 
-    def cluster_and_reorder(self, vectors: np.ndarray, metadata: List[TextChunk]
-                            ) -> Tuple[np.ndarray, List[TextChunk], List[Dict]]:
+    def cluster_document_vectors(self, vectors: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        Clusters vectors and reorders them.
-
-        Args:
-            vectors: A numpy array of vectors.
-            metadata: A list of TextChunk objects.
-
-        Returns:
-            A tuple containing:
-            - The reordered vector array.
-            - The reordered list of TextChunks.
-            - A list of dictionaries with info about each cluster (ID, size, etc.).
+        Clusters vectors from a single document and reorders them.
+        Handles cases with few vectors gracefully.
         """
         num_vectors, dim = vectors.shape
 
-        if num_vectors < self.n_clusters:
-            logging.warning(f"Number of vectors ({num_vectors}) is less than n_clusters ({self.n_clusters})."
-                            f" Adjusting n_clusters to {num_vectors}.")
-            self.n_clusters = num_vectors
+        # --- FIX 1: Dynamically adjust k ---
+        # If we have fewer vectors than desired clusters, reduce k.
+        n_clusters = min(self.n_clusters_per_doc, num_vectors)
+        if n_clusters <= 1:  # No point clustering 1 or 0 items
+            return vectors, vectors, np.arange(num_vectors)  # Return vectors as their own centroids
 
-        if self.n_clusters == 0:
-            return vectors, metadata, []
+        kmeans = faiss.Kmeans(d=dim, k=n_clusters, niter=20, verbose=False)
 
-        logging.info(f"Clustering {num_vectors} vectors into {self.n_clusters} clusters using Faiss K-means...")
+        # --- FIX 2: Set minimum points per centroid to avoid warnings ---
+        # We know we're working with small sets, so this is acceptable.
+        kmeans.min_points_per_centroid = 1
+        # Optionally, you could set it to a slightly higher number, like 2 or 3,
+        # to ensure centroids aren't based on a single outlier. 1 is fine to start.
 
-        kmeans = faiss.Kmeans(d=dim, k=self.n_clusters, niter=20, verbose=False)
         kmeans.train(vectors)
 
         centroids = kmeans.centroids
         _, assignments = kmeans.index.search(vectors, 1)
         assignments = assignments.flatten()
 
-        # Group original indices by cluster
-        cluster_members = [[] for _ in range(self.n_clusters)]
+        # Group original indices by local cluster
+        cluster_members = [[] for _ in range(n_clusters)]
         for i, cluster_id in enumerate(assignments):
             cluster_members[cluster_id].append(i)
 
         reordered_indices = []
-        cluster_info = []
-        current_pos = 0
-
-        logging.info("Reordering vectors based on cluster and similarity to centroid...")
-        for i in range(self.n_clusters):
+        for i in range(n_clusters):
             members = cluster_members[i]
             if not members:
                 continue
 
-            # Get vectors and centroid for this cluster
+            # Order members by similarity to their local centroid
             member_vectors = vectors[members]
             centroid = centroids[i]
-
-            # Calculate similarity (dot product, since vectors are normalized)
             similarities = np.dot(member_vectors, centroid)
-
-            # Sort members by similarity in descending order
             sorted_member_indices = [m for _, m in sorted(zip(similarities, members), key=lambda p: p[0], reverse=True)]
-
             reordered_indices.extend(sorted_member_indices)
 
-            cluster_info.append({
-                "cluster_id": i,
-                "start_index": current_pos,
-                "vector_count": len(sorted_member_indices)
-            })
-            current_pos += len(sorted_member_indices)
-
-        # Apply the new order
         reordered_vectors = vectors[reordered_indices]
-        reordered_metadata = [metadata[i] for i in reordered_indices]
 
-        logging.info("Finished clustering and reordering.")
-        return reordered_vectors, reordered_metadata, cluster_info
+        # Return reordered vectors, the centroids, and the mapping of old indices to new
+        return reordered_vectors, centroids, np.array(reordered_indices)
