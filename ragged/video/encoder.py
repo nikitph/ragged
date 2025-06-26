@@ -12,7 +12,6 @@ import re
 from datetime import datetime
 
 from ragged.services.uploader.r2_uploader import UploadServiceBuilder, R2Config
-from .knowledge_graph import KnowledgeGraphTrack, KnowledgeGraphIntegration
 
 
 @dataclass
@@ -161,8 +160,8 @@ class TextVectorPipeline:
 
         return vectors, metadata
 
-    def process_documents(self, documents: List[Dict[str, str]]) -> Tuple[np.ndarray, List[Dict], List[TextChunk]]:
-        """Process multiple documents into vectors and return chunks for KG processing"""
+    def process_documents(self, documents: List[Dict[str, str]]) -> Tuple[np.ndarray, List[Dict]]:
+        """Process multiple documents into vectors"""
         all_chunks = []
 
         for doc in documents:
@@ -175,10 +174,9 @@ class TextVectorPipeline:
             chunks = self.chunk_text(text, source)
             all_chunks.extend(chunks)
 
-        vectors, metadata = self.encode_chunks(all_chunks)
-        return vectors, metadata, all_chunks
+        return self.encode_chunks(all_chunks)
 
-    def process_text_files(self, file_paths: List[str]) -> Tuple[np.ndarray, List[Dict], List[TextChunk]]:
+    def process_text_files(self, file_paths: List[str]) -> Tuple[np.ndarray, List[Dict]]:
         """Process text files directly"""
         documents = []
 
@@ -198,14 +196,12 @@ class TextVectorPipeline:
 
 
 class VectorMP4Encoder:
-    """Enhanced encoder with CDN optimization features and Knowledge Graph support"""
+    """Enhanced encoder with CDN optimization features"""
 
-    def __init__(self, vector_dim: int = 384, chunk_size: int = 1000, enable_kg: bool = True):
+    def __init__(self, vector_dim: int = 384, chunk_size: int = 1000):
         self.vector_dim = vector_dim
         self.chunk_size = chunk_size
-        self.enable_kg = enable_kg
         self.fragments = []
-        self.kg_fragments = []
         self.faiss_index = None
         self.all_vectors = []
         self.current_byte_position = 0
@@ -216,34 +212,19 @@ class VectorMP4Encoder:
                 "total_vectors": 0,
                 "fragments": [],
                 "faiss_index_type": "IndexFlatIP",
-                "knowledge_graph": {
-                    "enabled": enable_kg,
-                    "total_entities": 0,
-                    "total_relations": 0,
-                    "fragments": []
-                },
                 "file_structure": {
                     "ftyp_start": 0,
                     "ftyp_size": 0,
                     "video_track_start": 0,
                     "video_track_size": 0,
-                    "vector_track_start": 0,
-                    "vector_track_size": 0,
-                    "kg_track_start": 0,
-                    "kg_track_size": 0,
                     "manifest_start": 0,
                     "manifest_size": 0,
+                    "fragments_start": 0,
                     "total_file_size": 0
                 }
             },
-            "vector_map": {},
-            "kg_map": {}
+            "vector_map": {}
         }
-
-        # Initialize KG components if enabled
-        if self.enable_kg:
-            self.kg_track = KnowledgeGraphTrack()
-            self.kg_integration = KnowledgeGraphIntegration(self.kg_track)
 
     def add_vectors(self, vectors: np.ndarray, metadata: List[Dict]):
         """Add vectors with metadata to be encoded"""
@@ -279,6 +260,7 @@ class VectorMP4Encoder:
                 "start_idx": start_vector_id,
                 "end_idx": end_vector_id,
                 "topics": list(set([m.get("topic", "") for m in chunk_metadata if m.get("topic")])),
+                # Byte positions will be filled during encoding
                 "byte_start": 0,
                 "byte_end": 0,
                 "byte_size": 0,
@@ -298,49 +280,6 @@ class VectorMP4Encoder:
                 }
 
         self.manifest["metadata"]["total_vectors"] += num_vectors
-
-    def add_knowledge_graph_data(self, text_chunks: List[TextChunk]):
-        """Process text chunks and add knowledge graph data"""
-        if not self.enable_kg:
-            print("Knowledge graph processing disabled")
-            return
-
-        print("Processing knowledge graph data...")
-
-        # Process text chunks through KG pipeline
-        kg_fragments_data, kg_metadata = self.kg_integration.process_and_integrate(text_chunks)
-
-        # Store KG fragments
-        for i, kg_fragment_data in enumerate(kg_fragments_data):
-            kg_fragment = {
-                "id": i,
-                "data": kg_fragment_data,
-                "size": len(kg_fragment_data)
-            }
-            self.kg_fragments.append(kg_fragment)
-
-        # Update manifest with KG metadata
-        self.manifest["metadata"]["knowledge_graph"].update(kg_metadata)
-
-        # Add KG fragment info to manifest
-        for i, kg_fragment in enumerate(self.kg_fragments):
-            kg_frag_info = {
-                "id": i,
-                "size": kg_fragment["size"],
-                "byte_start": 0,  # Will be updated during encoding
-                "byte_end": 0,
-                "moof_start": 0,
-                "mdat_start": 0,
-                "data_start": 0,
-                "data_size": kg_fragment["size"]
-            }
-            self.manifest["metadata"]["knowledge_graph"]["fragments"].append(kg_frag_info)
-
-            # Add to KG map
-            self.manifest["kg_map"][i] = {
-                "fragment_id": i,
-                "size": kg_fragment["size"]
-            }
 
     def _build_faiss_index(self):
         """Build Faiss index for vector search"""
@@ -390,7 +329,7 @@ class VectorMP4Encoder:
         return index
 
     def _serialize_fragment(self, fragment: Dict) -> bytes:
-        """Serialize a vector fragment into binary format"""
+        """Serialize a fragment into binary format"""
         header = {
             "id": fragment["id"],
             "vector_count": fragment["vector_count"],
@@ -413,11 +352,6 @@ class VectorMP4Encoder:
         )
 
         return packed_data
-
-    def _serialize_kg_fragment(self, kg_fragment: Dict) -> bytes:
-        """Serialize a knowledge graph fragment into binary format"""
-        # KG fragments are already serialized by the KG integration
-        return kg_fragment["data"]
 
     def _create_minimal_video_track(self) -> bytes:
         """Create a minimal video track with single black frame"""
@@ -473,7 +407,7 @@ class VectorMP4Encoder:
         return struct.pack('>I', size) + box_type.encode('ascii') + data
 
     def encode_to_mp4(self, output_path: str):
-        """Enhanced encode to MP4 with vector and knowledge graph tracks"""
+        """Enhanced encode to MP4 with precise byte tracking"""
         print("Building Faiss index...")
         self.faiss_index = self._build_faiss_index()
 
@@ -483,9 +417,9 @@ class VectorMP4Encoder:
 
         video_boxes = self._create_video_boxes()
 
-        # Serialize all vector fragments
-        serialized_vector_fragments = []
-        vector_fragment_boxes = []
+        # Serialize all fragments first to get accurate sizes
+        serialized_fragments = []
+        fragment_boxes = []
 
         for i, fragment in enumerate(self.fragments):
             fragment_data = self._serialize_fragment(fragment)
@@ -493,32 +427,14 @@ class VectorMP4Encoder:
             moof_box = self._create_mp4_box('moof', moof_header)
             mdat_box = self._create_mp4_box('mdat', fragment_data)
 
-            serialized_vector_fragments.append({
+            serialized_fragments.append({
                 'moof': moof_box,
                 'mdat': mdat_box,
                 'data': fragment_data
             })
-            vector_fragment_boxes.extend([moof_box, mdat_box])
+            fragment_boxes.extend([moof_box, mdat_box])
 
-        # Serialize all KG fragments
-        serialized_kg_fragments = []
-        kg_fragment_boxes = []
-
-        if self.enable_kg and self.kg_fragments:
-            for i, kg_fragment in enumerate(self.kg_fragments):
-                kg_data = self._serialize_kg_fragment(kg_fragment)
-                kg_moof_header = struct.pack('>II', kg_fragment["id"], len(kg_data))
-                kg_moof_box = self._create_mp4_box('kgmf', kg_moof_header)  # Custom KG moof type
-                kg_mdat_box = self._create_mp4_box('kgdt', kg_data)  # Custom KG mdat type
-
-                serialized_kg_fragments.append({
-                    'moof': kg_moof_box,
-                    'mdat': kg_mdat_box,
-                    'data': kg_data
-                })
-                kg_fragment_boxes.extend([kg_moof_box, kg_mdat_box])
-
-        # Calculate byte positions
+        # Update manifest with calculated byte positions
         self.current_byte_position = 0
 
         # FTYP box
@@ -532,20 +448,11 @@ class VectorMP4Encoder:
         self.manifest["metadata"]["file_structure"]["video_track_size"] = video_track_size
         self.current_byte_position += video_track_size
 
-        # Vector track
-        self.manifest["metadata"]["file_structure"]["vector_track_start"] = self.current_byte_position
-        vector_track_size = sum(len(box) for box in vector_fragment_boxes)
-        self.manifest["metadata"]["file_structure"]["vector_track_size"] = vector_track_size
-        self.current_byte_position += vector_track_size
-
-        # KG track
-        self.manifest["metadata"]["file_structure"]["kg_track_start"] = self.current_byte_position
-        kg_track_size = sum(len(box) for box in kg_fragment_boxes) if kg_fragment_boxes else 0
-        self.manifest["metadata"]["file_structure"]["kg_track_size"] = kg_track_size
-        self.current_byte_position += kg_track_size
-
-        # Manifest position (estimate)
+        # Manifest box (we'll update this after creating it)
         manifest_start = self.current_byte_position
+
+        # Calculate fragments start position (after manifest)
+        # We need to estimate manifest size first
         temp_manifest_data = json.dumps(self.manifest, indent=2).encode('utf-8')
         estimated_manifest_box = self._create_mp4_box('manf', temp_manifest_data)
         manifest_size = len(estimated_manifest_box)
@@ -554,13 +461,12 @@ class VectorMP4Encoder:
         self.manifest["metadata"]["file_structure"]["manifest_size"] = manifest_size
         self.current_byte_position += manifest_size
 
-        # Final file size
-        self.manifest["metadata"]["file_structure"]["total_file_size"] = self.current_byte_position
+        # Fragments start
+        self.manifest["metadata"]["file_structure"]["fragments_start"] = self.current_byte_position
 
         # Update fragment byte positions
-        current_pos = self.manifest["metadata"]["file_structure"]["vector_track_start"]
-        for i, serialized_frag in enumerate(serialized_vector_fragments):
-            fragment_start = current_pos
+        for i, serialized_frag in enumerate(serialized_fragments):
+            fragment_start = self.current_byte_position
             moof_size = len(serialized_frag['moof'])
             mdat_size = len(serialized_frag['mdat'])
             data_size = len(serialized_frag['data'])
@@ -571,30 +477,14 @@ class VectorMP4Encoder:
                 "byte_size": moof_size + mdat_size,
                 "moof_start": fragment_start,
                 "mdat_start": fragment_start + moof_size,
-                "data_start": fragment_start + moof_size + 8,
+                "data_start": fragment_start + moof_size + 8,  # Skip mdat header (8 bytes)
                 "data_size": data_size
             })
 
-            current_pos += moof_size + mdat_size
+            self.current_byte_position += moof_size + mdat_size
 
-        # Update KG fragment byte positions
-        current_pos = self.manifest["metadata"]["file_structure"]["kg_track_start"]
-        for i, serialized_kg_frag in enumerate(serialized_kg_fragments):
-            kg_fragment_start = current_pos
-            kg_moof_size = len(serialized_kg_frag['moof'])
-            kg_mdat_size = len(serialized_kg_frag['mdat'])
-            kg_data_size = len(serialized_kg_frag['data'])
-
-            self.manifest["metadata"]["knowledge_graph"]["fragments"][i].update({
-                "byte_start": kg_fragment_start,
-                "byte_end": kg_fragment_start + kg_moof_size + kg_mdat_size,
-                "moof_start": kg_fragment_start,
-                "mdat_start": kg_fragment_start + kg_moof_size,
-                "data_start": kg_fragment_start + kg_moof_size + 8,
-                "data_size": kg_data_size
-            })
-
-            current_pos += kg_moof_size + kg_mdat_size
+        # Final file size
+        self.manifest["metadata"]["file_structure"]["total_file_size"] = self.current_byte_position
 
         # Create final manifest with accurate byte positions
         final_manifest_data = json.dumps(self.manifest, indent=2).encode('utf-8')
@@ -602,32 +492,55 @@ class VectorMP4Encoder:
 
         # Write the complete MP4 file
         with open(output_path, 'wb') as f:
-            # Write FTYP box
-            f.write(ftyp_box)
-            print(f"FTYP written: {len(ftyp_box)} bytes")
+            # Write in order and track actual positions
+            actual_position = 0
 
-            # Write video boxes
+            # FTYP box
+            f.write(ftyp_box)
+            actual_position += len(ftyp_box)
+            print(f"FTYP written: {len(ftyp_box)} bytes, position now: {actual_position}")
+
+            # Video boxes
             for i, box in enumerate(video_boxes):
                 f.write(box)
-                print(f"Video box {i} written: {len(box)} bytes")
+                actual_position += len(box)
+                print(f"Video box {i} written: {len(box)} bytes, position now: {actual_position}")
 
-            # Write vector fragment boxes
-            for i, serialized_frag in enumerate(serialized_vector_fragments):
-                f.write(serialized_frag['moof'])
-                f.write(serialized_frag['mdat'])
-                print(f"Vector fragment {i} written: {len(serialized_frag['data'])} bytes")
-
-            # Write KG fragment boxes
-            for i, serialized_kg_frag in enumerate(serialized_kg_fragments):
-                f.write(serialized_kg_frag['moof'])
-                f.write(serialized_kg_frag['mdat'])
-                print(f"KG fragment {i} written: {len(serialized_kg_frag['data'])} bytes")
-
-            # Write manifest box
+            # Manifest box
             f.write(manifest_box)
-            print(f"Manifest written: {len(manifest_box)} bytes")
+            actual_position += len(manifest_box)
+            print(f"Manifest written: {len(manifest_box)} bytes, position now: {actual_position}")
 
-        # Save separate manifest file
+            # Fragment boxes with actual position tracking
+            for i, serialized_frag in enumerate(serialized_fragments):
+                fragment_actual_start = actual_position
+
+                # Write moof
+                f.write(serialized_frag['moof'])
+                actual_position += len(serialized_frag['moof'])
+                mdat_actual_start = actual_position
+
+                # Write mdat
+                f.write(serialized_frag['mdat'])
+                actual_position += len(serialized_frag['mdat'])
+
+                # Update manifest with actual positions
+                self.manifest["metadata"]["fragments"][i].update({
+                    "byte_start": fragment_actual_start,
+                    "byte_end": actual_position,
+                    "moof_start": fragment_actual_start,
+                    "mdat_start": mdat_actual_start,
+                    "data_start": mdat_actual_start + 8,  # Skip mdat header (8 bytes)
+                    "data_size": len(serialized_frag['data'])
+                })
+
+                print(
+                    f"Fragment {i} written: moof at {fragment_actual_start}, mdat at {mdat_actual_start}, data at {mdat_actual_start + 8}, size {len(serialized_frag['data'])}")
+
+        # Update final file size
+        self.manifest["metadata"]["file_structure"]["total_file_size"] = actual_position
+
+        # Save separate manifest file for CDN optimization (with corrected positions)
         manifest_path = output_path.replace('.mp4', '_manifest.json')
         with open(manifest_path, 'w') as f:
             json.dump(self.manifest, f, indent=2)
@@ -639,12 +552,11 @@ class VectorMP4Encoder:
             print(f"Faiss index saved to {faiss_path}")
 
         print(f"Encoded {self.manifest['metadata']['total_vectors']} vectors to {output_path}")
-        print(f"Created {len(self.fragments)} vector fragments")
-        if self.enable_kg:
-            print(f"Created {len(self.kg_fragments)} knowledge graph fragments")
-            print(f"Extracted {self.manifest['metadata']['knowledge_graph']['total_entities']} entities")
-            print(f"Extracted {self.manifest['metadata']['knowledge_graph']['total_relations']} relations")
+        print(f"Created {len(self.fragments)} fragments")
         print(f"Manifest saved to {manifest_path}")
+        print(f"File structure:")
+        for key, value in self.manifest["metadata"]["file_structure"].items():
+            print(f"  {key}: {value}")
 
     def encode_and_upload(self, output_path: str):
         # Existing encoding logic
@@ -654,9 +566,9 @@ class VectorMP4Encoder:
         upload_service.execute_upload(output_path)
 
 
-# Updated main function
-def create_text_vector_mp4(documents: List[Dict[str, str]], output_path: str, enable_kg: bool = True):
-    """Complete pipeline: text documents → vectors + knowledge graph → MP4"""
+# Example usage
+def create_text_vector_mp4(documents: List[Dict[str, str]], output_path: str):
+    """Complete pipeline: text documents → vectors → MP4 with CDN optimizations"""
 
     # Initialize pipeline
     pipeline = TextVectorPipeline(
@@ -666,24 +578,20 @@ def create_text_vector_mp4(documents: List[Dict[str, str]], output_path: str, en
         vector_dim=384
     )
 
-    # Process documents into vectors and get text chunks for KG processing
-    vectors, metadata, text_chunks = pipeline.process_documents(documents)
+    # Process documents into vectors
+    vectors, metadata = pipeline.process_documents(documents)
 
     if len(vectors) == 0:
         print("No vectors generated from documents")
         return
 
-    # Initialize enhanced MP4 encoder with KG support
-    encoder = VectorMP4Encoder(vector_dim=384, chunk_size=1000, enable_kg=enable_kg)
+    # Initialize enhanced MP4 encoder
+    encoder = VectorMP4Encoder(vector_dim=384, chunk_size=1000)
 
     # Add vectors to encoder
     encoder.add_vectors(vectors, metadata)
 
-    # Add knowledge graph data
-    if enable_kg:
-        encoder.add_knowledge_graph_data(text_chunks)
-
-    # Encode to MP4 with both vector and KG tracks
+    # Encode to MP4 with byte tracking
     encoder.encode_to_mp4(output_path)
 
 
@@ -704,4 +612,4 @@ if __name__ == "__main__":
         }
     ]
 
-    create_text_vector_mp4(sample_docs, "knowledge_base.mp4", enable_kg=True)
+    create_text_vector_mp4(sample_docs, "knowledge_base.mp4")
