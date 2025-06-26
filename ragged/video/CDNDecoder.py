@@ -714,7 +714,7 @@ class CDNVectorMP4Decoder:
             if fragment_id in fragments:
                 fragment = fragments[fragment_id]
                 vector = fragment["vectors"][local_offset]
-                metadata = vector_info["metadata"]
+                metadata = fragment["metadata"][local_offset]
 
                 results.append({
                     "vector": vector,
