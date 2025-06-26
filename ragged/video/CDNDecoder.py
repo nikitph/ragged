@@ -14,10 +14,22 @@ from urllib.parse import urlparse
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import io
+import networkx as nx
+from dataclasses import dataclass
+
+
+@dataclass
+class KGSearchResult:
+    """Result from knowledge graph search"""
+    entities: List[Dict]
+    relations: List[Dict]
+    subgraph: nx.Graph
+    fragment_id: int
+    similarity_score: float = 0.0
 
 
 class CDNVectorMP4Decoder:
-    """Enhanced decoder with full CDN support, range requests, and intelligent caching"""
+    """Enhanced decoder with full CDN support, range requests, intelligent caching, and Knowledge Graph support"""
 
     def __init__(self,
                  mp4_path: str,
@@ -28,9 +40,10 @@ class CDNVectorMP4Decoder:
                  max_retries: int = 3,
                  timeout: int = 30,
                  chunk_size: int = 8192,
-                 enable_prefetching: bool = True):
+                 enable_prefetching: bool = True,
+                 enable_kg: bool = True):
         """
-        Initialize enhanced decoder with full CDN capabilities
+        Initialize enhanced decoder with full CDN capabilities and KG support
 
         Args:
             mp4_path: Path or URL to MP4 file
@@ -42,6 +55,7 @@ class CDNVectorMP4Decoder:
             timeout: Request timeout in seconds
             chunk_size: Size of chunks for streaming downloads
             enable_prefetching: Whether to prefetch adjacent fragments
+            enable_kg: Whether to enable knowledge graph functionality
         """
         self.mp4_path = mp4_path
         self.manifest_path = manifest_path or self._get_companion_path(mp4_path, '_manifest.json')
@@ -53,14 +67,21 @@ class CDNVectorMP4Decoder:
         self.timeout = timeout
         self.chunk_size = chunk_size
         self.enable_prefetching = enable_prefetching
+        self.enable_kg = enable_kg
 
         # Initialize caches and state
         self.memory_cache = {}
+        self.kg_memory_cache = {}  # Separate cache for KG fragments
         self.manifest = None
         self.faiss_index = None
         self.file_sizes = {}
         self.executor = ThreadPoolExecutor(max_workers=4)
         self.prefetch_futures = {}
+        self.kg_prefetch_futures = {}
+
+        # Knowledge graph state
+        self.global_graph = None
+        self.entity_index = {}  # Entity text -> list of fragment IDs
 
         # Determine if files are remote
         self.is_mp4_remote = self._is_url(mp4_path)
@@ -74,6 +95,9 @@ class CDNVectorMP4Decoder:
         # Initialize components
         self._load_manifest()
         self._load_faiss_index()
+
+        if self.enable_kg:
+            self._initialize_kg_index()
 
     def _is_url(self, path: str) -> bool:
         """Check if path is a URL"""
@@ -219,6 +243,19 @@ class CDNVectorMP4Decoder:
 
             print(f"Loaded manifest with {self.manifest['metadata']['total_vectors']} vectors")
 
+            # Check for KG data
+            if self.enable_kg and 'knowledge_graph' in self.manifest['metadata']:
+                kg_meta = self.manifest['metadata']['knowledge_graph']
+                if kg_meta.get('enabled', False):
+                    print(
+                        f"Knowledge graph enabled: {kg_meta['total_entities']} entities, {kg_meta['total_relations']} relations")
+                else:
+                    print("Knowledge graph not enabled in this file")
+                    self.enable_kg = False
+            else:
+                print("No knowledge graph data found in manifest")
+                self.enable_kg = False
+
         except Exception as e:
             raise RuntimeError(f"Failed to load manifest: {e}")
 
@@ -286,6 +323,26 @@ class CDNVectorMP4Decoder:
             print(f"Warning: Failed to load Faiss index: {e}")
             print("Search functionality will be limited without the index")
 
+    def _initialize_kg_index(self):
+        """Initialize knowledge graph index for fast entity lookups"""
+        if not self.enable_kg or not self.manifest:
+            return
+
+        print("🔗 Initializing knowledge graph index...")
+
+        kg_meta = self.manifest['metadata'].get('knowledge_graph', {})
+        if not kg_meta.get('enabled', False):
+            print("Knowledge graph not enabled in manifest")
+            return
+
+        # Build entity index for fast lookups
+        for fragment_info in kg_meta.get('fragments', []):
+            fragment_id = fragment_info['id']
+            # We'll populate this when fragments are loaded
+            # For now, just note that KG is available
+
+        print(f"✅ Knowledge graph index ready")
+
     def _extract_manifest_from_mp4(self) -> Dict:
         """Extract manifest from MP4 file with range request support"""
         if self.is_mp4_remote:
@@ -319,17 +376,19 @@ class CDNVectorMP4Decoder:
 
         raise ValueError("No manifest found in MP4 file")
 
-    def _get_cache_key(self, fragment_id: int) -> str:
+    def _get_cache_key(self, fragment_id: int, is_kg: bool = False) -> str:
         """Generate cache key for fragment"""
-        return f"fragment_{fragment_id}_{hashlib.md5(self.mp4_path.encode()).hexdigest()[:8]}"
+        prefix = "kg_fragment" if is_kg else "fragment"
+        return f"{prefix}_{fragment_id}_{hashlib.md5(self.mp4_path.encode()).hexdigest()[:8]}"
 
-    def _get_fragment_from_cache(self, fragment_id: int) -> Optional[Dict]:
+    def _get_fragment_from_cache(self, fragment_id: int, is_kg: bool = False) -> Optional[Dict]:
         """Try to get fragment from memory or disk cache"""
-        cache_key = self._get_cache_key(fragment_id)
+        cache_key = self._get_cache_key(fragment_id, is_kg)
+        cache_dict = self.kg_memory_cache if is_kg else self.memory_cache
 
         # Check memory cache first
-        if cache_key in self.memory_cache:
-            return self.memory_cache[cache_key]
+        if cache_key in cache_dict:
+            return cache_dict[cache_key]
 
         # Check disk cache
         if self.disk_cache_dir:
@@ -339,28 +398,30 @@ class CDNVectorMP4Decoder:
                     with open(cache_file, 'rb') as f:
                         fragment = pickle.load(f)
                         # Add to memory cache
-                        self._add_to_memory_cache(cache_key, fragment)
+                        self._add_to_memory_cache(cache_key, fragment, is_kg)
                         return fragment
                 except:
                     pass
 
         return None
 
-    def _add_to_memory_cache(self, cache_key: str, fragment: Dict):
+    def _add_to_memory_cache(self, cache_key: str, fragment: Dict, is_kg: bool = False):
         """Add fragment to memory cache with LRU eviction"""
+        cache_dict = self.kg_memory_cache if is_kg else self.memory_cache
+
         # Simple FIFO eviction when cache is full
-        while len(self.memory_cache) >= self.cache_size:
-            oldest_key = next(iter(self.memory_cache))
-            del self.memory_cache[oldest_key]
+        while len(cache_dict) >= self.cache_size:
+            oldest_key = next(iter(cache_dict))
+            del cache_dict[oldest_key]
 
-        self.memory_cache[cache_key] = fragment
+        cache_dict[cache_key] = fragment
 
-    def _save_fragment_to_cache(self, fragment_id: int, fragment: Dict):
+    def _save_fragment_to_cache(self, fragment_id: int, fragment: Dict, is_kg: bool = False):
         """Save fragment to both memory and disk cache"""
-        cache_key = self._get_cache_key(fragment_id)
+        cache_key = self._get_cache_key(fragment_id, is_kg)
 
         # Add to memory cache
-        self._add_to_memory_cache(cache_key, fragment)
+        self._add_to_memory_cache(cache_key, fragment, is_kg)
 
         # Save to disk cache
         if self.disk_cache_dir:
@@ -371,8 +432,60 @@ class CDNVectorMP4Decoder:
             except Exception as e:
                 print(f"Failed to save fragment to disk cache: {e}")
 
+    def _download_kg_fragment(self, fragment_id: int) -> Dict:
+        """Download and parse a specific knowledge graph fragment"""
+        if not self.manifest or not self.enable_kg:
+            raise RuntimeError("Manifest not loaded or KG not enabled")
+
+        # Find KG fragment info
+        kg_fragments = self.manifest["metadata"]["knowledge_graph"].get("fragments", [])
+        fragment_info = None
+        for frag in kg_fragments:
+            if frag["id"] == fragment_id:
+                fragment_info = frag
+                break
+
+        if not fragment_info:
+            raise ValueError(f"KG Fragment {fragment_id} not found in manifest")
+
+        # Download KG fragment data using range request
+        start_byte = fragment_info["byte_start"]
+        end_byte = fragment_info["byte_end"] - 1  # HTTP ranges are inclusive
+
+        print(f"Downloading KG fragment {fragment_id} (bytes {start_byte}-{end_byte})")
+        fragment_data = self._download_range(self.mp4_path, start_byte, end_byte)
+
+        # Parse the KG fragment
+        return self._parse_kg_fragment_data(fragment_data, fragment_info)
+
+    def _parse_kg_fragment_data(self, data: bytes, fragment_info: Dict) -> Dict:
+        """Parse binary knowledge graph fragment data"""
+        # Skip kgmf box to get to kgdt content
+        kgdt_offset = fragment_info.get("mdat_start", 8) - fragment_info.get("byte_start", 0)
+        kgdt_data = data[kgdt_offset + 8:]  # Skip kgdt header
+
+        # Read header with size information
+        if len(kgdt_data) < 12:
+            raise ValueError("Invalid KG fragment data: too short")
+
+        json_size, entity_count, relation_count = struct.unpack('<III', kgdt_data[:12])
+
+        # Read JSON data
+        json_data = kgdt_data[12:12 + json_size]
+        fragment_data = json.loads(json_data.decode('utf-8'))
+
+        return {
+            "fragment_id": fragment_data["fragment_id"],
+            "entities": fragment_data["entities"],
+            "relations": fragment_data["relations"],
+            "entity_count": fragment_data["entity_count"],
+            "relation_count": fragment_data["relation_count"],
+            "chunk_ids": set(fragment_data["chunk_ids"]),
+            "timestamp": fragment_data["timestamp"]
+        }
+
     def _download_fragment(self, fragment_id: int) -> Dict:
-        """Download and parse a specific fragment"""
+        """Download and parse a specific vector fragment"""
         if not self.manifest:
             raise RuntimeError("Manifest not loaded")
 
@@ -390,80 +503,14 @@ class CDNVectorMP4Decoder:
         start_byte = fragment_info["byte_start"]
         end_byte = fragment_info["byte_end"] - 1  # HTTP ranges are inclusive
 
-        print(f"Downloading fragment {fragment_id} (bytes {start_byte}-{end_byte})")
+        print(f"Downloading vector fragment {fragment_id} (bytes {start_byte}-{end_byte})")
         fragment_data = self._download_range(self.mp4_path, start_byte, end_byte)
 
         # Parse the fragment
         return self._parse_fragment_data(fragment_data, fragment_info)
 
-    def _download_fragment_legacy(self, fragment_id: int) -> Dict:
-        """Download fragment using legacy method for older manifests"""
-        print(f"Using legacy download method for fragment {fragment_id}")
-
-        # For legacy format, we need to download the entire file and parse it
-        # This is less efficient but maintains compatibility
-
-        if self.is_mp4_remote:
-            # Download entire file (we'll cache it)
-            if not hasattr(self, '_full_file_cache'):
-                print("Downloading entire MP4 file for legacy compatibility...")
-                self._full_file_cache = self._download_with_retries(self.mp4_path)
-
-            file_data = self._full_file_cache
-        else:
-            # Local file
-            with open(self.mp4_path, 'rb') as f:
-                file_data = f.read()
-
-        # Parse MP4 structure to find the fragment
-        return self._parse_mp4_for_fragment(file_data, fragment_id)
-
-    def _parse_mp4_for_fragment(self, file_data: bytes, target_fragment_id: int) -> Dict:
-        """Parse MP4 file to find specific fragment (legacy method)"""
-        offset = 0
-
-        while offset < len(file_data) - 8:
-            try:
-                box_size, box_type = struct.unpack('>I4s', file_data[offset:offset + 8])
-                box_type = box_type.decode('ascii')
-
-                if box_type == 'moof':
-                    # Found a movie fragment box
-                    moof_data = file_data[offset + 8:offset + box_size]
-                    if len(moof_data) >= 8:
-                        frag_id, vector_count = struct.unpack('>II', moof_data[:8])
-
-                        if frag_id == target_fragment_id:
-                            # Found our fragment, now get the mdat
-                            mdat_offset = offset + box_size
-                            if mdat_offset + 8 <= len(file_data):
-                                mdat_size, mdat_type = struct.unpack('>I4s', file_data[mdat_offset:mdat_offset + 8])
-                                mdat_type = mdat_type.decode('ascii')
-
-                                if mdat_type == 'mdat':
-                                    mdat_data = file_data[mdat_offset + 8:mdat_offset + mdat_size]
-
-                                    # Create a fake fragment_info for parsing
-                                    fragment_info = {
-                                        "id": frag_id,
-                                        "mdat_start": mdat_offset,
-                                        "byte_start": offset
-                                    }
-
-                                    return self._parse_fragment_data(mdat_data, fragment_info, legacy=True)
-
-                offset += box_size
-                if box_size == 0:
-                    break
-
-            except (struct.error, UnicodeDecodeError):
-                offset += 1
-
-        raise ValueError(f"Fragment {target_fragment_id} not found in MP4 file")
-
     def _parse_fragment_data(self, data: bytes, fragment_info: Dict, legacy: bool = False) -> Dict:
-        """Parse binary fragment data"""
-
+        """Parse binary vector fragment data"""
         if legacy:
             # For legacy format, data is already the mdat content
             mdat_data = data
@@ -500,6 +547,41 @@ class CDNVectorMP4Decoder:
             "metadata": metadata
         }
 
+    def _get_kg_fragment(self, fragment_id: int) -> Dict:
+        """Get KG fragment with caching"""
+        # Check cache first
+        fragment = self._get_fragment_from_cache(fragment_id, is_kg=True)
+        if fragment:
+            return fragment
+
+        # Download fragment
+        fragment = self._download_kg_fragment(fragment_id)
+
+        # Cache the fragment
+        self._save_fragment_to_cache(fragment_id, fragment, is_kg=True)
+
+        return fragment
+
+    def _get_fragment(self, fragment_id: int) -> Dict:
+        """Get vector fragment with caching and prefetching"""
+        # Check cache first
+        fragment = self._get_fragment_from_cache(fragment_id)
+        if fragment:
+            # Start prefetching adjacent fragments
+            self._prefetch_adjacent_fragments(fragment_id)
+            return fragment
+
+        # Download fragment
+        fragment = self._download_fragment(fragment_id)
+
+        # Cache the fragment
+        self._save_fragment_to_cache(fragment_id, fragment)
+
+        # Start prefetching
+        self._prefetch_adjacent_fragments(fragment_id)
+
+        return fragment
+
     def _prefetch_adjacent_fragments(self, fragment_id: int):
         """Prefetch adjacent fragments in background"""
         if not self.enable_prefetching:
@@ -520,32 +602,12 @@ class CDNVectorMP4Decoder:
                     future = self.executor.submit(self._get_fragment, target_fragment_id)
                     self.prefetch_futures[target_fragment_id] = future
 
-    def _get_fragment(self, fragment_id: int) -> Dict:
-        """Get fragment with caching and prefetching"""
-        # Check cache first
-        fragment = self._get_fragment_from_cache(fragment_id)
-        if fragment:
-            # Start prefetching adjacent fragments
-            self._prefetch_adjacent_fragments(fragment_id)
-            return fragment
-
-        # Download fragment
-        fragment = self._download_fragment(fragment_id)
-
-        # Cache the fragment
-        self._save_fragment_to_cache(fragment_id, fragment)
-
-        # Start prefetching
-        self._prefetch_adjacent_fragments(fragment_id)
-
-        return fragment
-
     def get_manifest_info(self) -> Dict:
-        """Get information about the manifest"""
+        """Get information about the manifest including KG data"""
         if not self.manifest:
             raise RuntimeError("Manifest not loaded")
 
-        return {
+        info = {
             "total_vectors": self.manifest["metadata"]["total_vectors"],
             "vector_dim": self.manifest["metadata"]["vector_dim"],
             "chunk_size": self.manifest["metadata"]["chunk_size"],
@@ -561,6 +623,20 @@ class CDNVectorMP4Decoder:
                 "faiss": self.is_faiss_remote
             }
         }
+
+        # Add KG information if available
+        if self.enable_kg and 'knowledge_graph' in self.manifest['metadata']:
+            kg_meta = self.manifest['metadata']['knowledge_graph']
+            info["knowledge_graph"] = {
+                "enabled": kg_meta.get('enabled', False),
+                "total_entities": kg_meta.get('total_entities', 0),
+                "total_relations": kg_meta.get('total_relations', 0),
+                "num_kg_fragments": len(kg_meta.get('fragments', [])),
+                "entity_types": kg_meta.get('entity_types', {}),
+                "relation_types": kg_meta.get('relation_types', {})
+            }
+
+        return info
 
     def get_vectors_by_ids(self, vector_ids: List[int]) -> Tuple[np.ndarray, List[Dict]]:
         """Retrieve specific vectors by their IDs with parallel downloads"""
@@ -619,6 +695,276 @@ class CDNVectorMP4Decoder:
                     metadata_list.append(fragment["metadata"][local_offset])
 
         return np.array(vectors_list) if vectors_list else np.array([]), metadata_list
+
+    def search_entities(self, entity_text: str, entity_type: Optional[str] = None) -> List[KGSearchResult]:
+        """Search for entities in the knowledge graph"""
+        if not self.enable_kg:
+            raise RuntimeError("Knowledge graph not enabled")
+
+        results = []
+        kg_fragments = self.manifest["metadata"]["knowledge_graph"].get("fragments", [])
+
+        # Search through KG fragments
+        for kg_frag_info in kg_fragments:
+            kg_fragment = self._get_kg_fragment(kg_frag_info["id"])
+
+            # Search entities in this fragment
+            matching_entities = []
+            for entity in kg_fragment["entities"]:
+                if entity_text.lower() in entity["text"].lower():
+                    if entity_type is None or entity["label"] == entity_type:
+                        matching_entities.append(entity)
+
+            if matching_entities:
+                # Get related relations
+                entity_ids = {e["entity_id"] for e in matching_entities}
+                related_relations = []
+                for relation in kg_fragment["relations"]:
+                    if (relation["source_entity"] in entity_ids or
+                            relation["target_entity"] in entity_ids):
+                        related_relations.append(relation)
+
+                # Build subgraph
+                subgraph = nx.Graph()
+                for entity in matching_entities:
+                    subgraph.add_node(entity["entity_id"], **entity)
+
+                for relation in related_relations:
+                    if (subgraph.has_node(relation["source_entity"]) and
+                            subgraph.has_node(relation["target_entity"])):
+                        subgraph.add_edge(
+                            relation["source_entity"],
+                            relation["target_entity"],
+                            **relation
+                        )
+
+                result = KGSearchResult(
+                    entities=matching_entities,
+                    relations=related_relations,
+                    subgraph=subgraph,
+                    fragment_id=kg_fragment["fragment_id"]
+                )
+                results.append(result)
+
+        return results
+
+    def search_relations(self, relation_type: str, source_entity: Optional[str] = None,
+                         target_entity: Optional[str] = None) -> List[KGSearchResult]:
+        """Search for relations in the knowledge graph"""
+        if not self.enable_kg:
+            raise RuntimeError("Knowledge graph not enabled")
+
+        results = []
+        kg_fragments = self.manifest["metadata"]["knowledge_graph"].get("fragments", [])
+
+        # Search through KG fragments
+        for kg_frag_info in kg_fragments:
+            kg_fragment = self._get_kg_fragment(kg_frag_info["id"])
+
+            # Search relations in this fragment
+            matching_relations = []
+            for relation in kg_fragment["relations"]:
+                if relation["relation_type"] == relation_type:
+                    # Check entity filters if provided
+                    if source_entity:
+                        # Find entity by text
+                        source_matches = [e for e in kg_fragment["entities"]
+                                          if e["entity_id"] == relation["source_entity"]
+                                          and source_entity.lower() in e["text"].lower()]
+                        if not source_matches:
+                            continue
+
+                    if target_entity:
+                        # Find entity by text
+                        target_matches = [e for e in kg_fragment["entities"]
+                                          if e["entity_id"] == relation["target_entity"]
+                                          and target_entity.lower() in e["text"].lower()]
+                        if not target_matches:
+                            continue
+
+                    matching_relations.append(relation)
+
+            if matching_relations:
+                # Get related entities
+                entity_ids = set()
+                for relation in matching_relations:
+                    entity_ids.add(relation["source_entity"])
+                    entity_ids.add(relation["target_entity"])
+
+                related_entities = [e for e in kg_fragment["entities"]
+                                    if e["entity_id"] in entity_ids]
+
+                # Build subgraph
+                subgraph = nx.Graph()
+                for entity in related_entities:
+                    subgraph.add_node(entity["entity_id"], **entity)
+
+                for relation in matching_relations:
+                    if (subgraph.has_node(relation["source_entity"]) and
+                            subgraph.has_node(relation["target_entity"])):
+                        subgraph.add_edge(
+                            relation["source_entity"],
+                            relation["target_entity"],
+                            **relation
+                        )
+
+                result = KGSearchResult(
+                    entities=related_entities,
+                    relations=matching_relations,
+                    subgraph=subgraph,
+                    fragment_id=kg_fragment["fragment_id"]
+                )
+                results.append(result)
+
+        return results
+
+    def get_entity_neighborhood(self, entity_text: str, depth: int = 1) -> Optional[KGSearchResult]:
+        """Get the neighborhood of an entity up to a certain depth"""
+        if not self.enable_kg:
+            raise RuntimeError("Knowledge graph not enabled")
+
+        # First find the entity
+        entity_results = self.search_entities(entity_text)
+        if not entity_results:
+            return None
+
+        # Combine all found entities and build expanded neighborhood
+        all_entities = []
+        all_relations = []
+        combined_graph = nx.Graph()
+
+        # Start with direct matches
+        for result in entity_results:
+            all_entities.extend(result.entities)
+            all_relations.extend(result.relations)
+            combined_graph = nx.union(combined_graph, result.subgraph)
+
+        # Expand to specified depth
+        current_entities = {e["entity_id"] for e in all_entities}
+
+        for current_depth in range(depth):
+            kg_fragments = self.manifest["metadata"]["knowledge_graph"].get("fragments", [])
+            new_entities = set()
+
+            for kg_frag_info in kg_fragments:
+                kg_fragment = self._get_kg_fragment(kg_frag_info["id"])
+
+                # Find relations connected to current entities
+                for relation in kg_fragment["relations"]:
+                    if relation["source_entity"] in current_entities:
+                        new_entities.add(relation["target_entity"])
+                        if relation not in all_relations:
+                            all_relations.append(relation)
+                    elif relation["target_entity"] in current_entities:
+                        new_entities.add(relation["source_entity"])
+                        if relation not in all_relations:
+                            all_relations.append(relation)
+
+                # Add new entities
+                for entity in kg_fragment["entities"]:
+                    if entity["entity_id"] in new_entities:
+                        if entity not in all_entities:
+                            all_entities.append(entity)
+                            combined_graph.add_node(entity["entity_id"], **entity)
+
+            # Add new relations to graph
+            for relation in all_relations:
+                if (combined_graph.has_node(relation["source_entity"]) and
+                        combined_graph.has_node(relation["target_entity"])):
+                    combined_graph.add_edge(
+                        relation["source_entity"],
+                        relation["target_entity"],
+                        **relation
+                    )
+
+            current_entities.update(new_entities)
+
+        return KGSearchResult(
+            entities=all_entities,
+            relations=all_relations,
+            subgraph=combined_graph,
+            fragment_id=-1  # Multiple fragments
+        )
+
+    def hybrid_search(self, query_vector: np.ndarray, entity_filter: Optional[str] = None,
+                      relation_filter: Optional[str] = None, top_k: int = 10) -> List[Dict]:
+        """Perform hybrid search combining vector similarity and knowledge graph filtering"""
+        if not self.faiss_index:
+            raise RuntimeError("Faiss index not loaded. Cannot perform hybrid search.")
+
+        # First, perform vector search
+        vector_results = self.search_vectors(query_vector, top_k * 3)  # Get more for filtering
+
+        if not self.enable_kg or (not entity_filter and not relation_filter):
+            # No KG filtering requested, return vector results
+            return vector_results[:top_k]
+
+        # Filter results using knowledge graph
+        filtered_results = []
+
+        for result in vector_results:
+            vector_metadata = result["metadata"]
+            chunk_id = vector_metadata.get("chunk_id")
+
+            if chunk_id is None:
+                continue
+
+            # Find KG fragments that contain this chunk
+            relevant_kg_fragments = []
+            kg_fragments = self.manifest["metadata"]["knowledge_graph"].get("fragments", [])
+
+            for kg_frag_info in kg_fragments:
+                kg_fragment = self._get_kg_fragment(kg_frag_info["id"])
+                if chunk_id in kg_fragment["chunk_ids"]:
+                    relevant_kg_fragments.append(kg_fragment)
+
+            # Check if this result matches our KG filters
+            matches_filter = False
+
+            for kg_fragment in relevant_kg_fragments:
+                # Check entity filter
+                if entity_filter:
+                    entity_match = any(
+                        entity_filter.lower() in entity["text"].lower()
+                        for entity in kg_fragment["entities"]
+                        if entity["chunk_id"] == chunk_id
+                    )
+                    if not entity_match:
+                        continue
+
+                # Check relation filter
+                if relation_filter:
+                    relation_match = any(
+                        relation["relation_type"] == relation_filter
+                        for relation in kg_fragment["relations"]
+                        if relation["chunk_id"] == chunk_id
+                    )
+                    if not relation_match:
+                        continue
+
+                matches_filter = True
+                break
+
+            if matches_filter or (not entity_filter and not relation_filter):
+                # Add KG context to result
+                kg_context = {
+                    "entities": [],
+                    "relations": []
+                }
+
+                for kg_fragment in relevant_kg_fragments:
+                    chunk_entities = [e for e in kg_fragment["entities"] if e["chunk_id"] == chunk_id]
+                    chunk_relations = [r for r in kg_fragment["relations"] if r["chunk_id"] == chunk_id]
+                    kg_context["entities"].extend(chunk_entities)
+                    kg_context["relations"].extend(chunk_relations)
+
+                result["kg_context"] = kg_context
+                filtered_results.append(result)
+
+            if len(filtered_results) >= top_k:
+                break
+
+        return filtered_results
 
     def get_vectors_by_topic(self, topic: str) -> Tuple[np.ndarray, List[Dict]]:
         """Retrieve all vectors from a specific topic"""
@@ -725,10 +1071,57 @@ class CDNVectorMP4Decoder:
 
         return results
 
+    def get_kg_statistics(self) -> Dict:
+        """Get comprehensive knowledge graph statistics"""
+        if not self.enable_kg:
+            return {"enabled": False}
+
+        kg_meta = self.manifest["metadata"]["knowledge_graph"]
+
+        # Load all KG fragments to get detailed stats
+        all_entities = []
+        all_relations = []
+
+        for kg_frag_info in kg_meta.get("fragments", []):
+            kg_fragment = self._get_kg_fragment(kg_frag_info["id"])
+            all_entities.extend(kg_fragment["entities"])
+            all_relations.extend(kg_fragment["relations"])
+
+        # Calculate statistics
+        entity_types = {}
+        relation_types = {}
+        chunk_coverage = set()
+
+        for entity in all_entities:
+            entity_type = entity["label"]
+            entity_types[entity_type] = entity_types.get(entity_type, 0) + 1
+            chunk_coverage.add(entity["chunk_id"])
+
+        for relation in all_relations:
+            rel_type = relation["relation_type"]
+            relation_types[rel_type] = relation_types.get(rel_type, 0) + 1
+            chunk_coverage.add(relation["chunk_id"])
+
+        return {
+            "enabled": True,
+            "total_entities": len(all_entities),
+            "total_relations": len(all_relations),
+            "unique_entity_types": len(entity_types),
+            "unique_relation_types": len(relation_types),
+            "entity_type_distribution": entity_types,
+            "relation_type_distribution": relation_types,
+            "chunks_with_kg_data": len(chunk_coverage),
+            "kg_fragments": len(kg_meta.get("fragments", [])),
+            "coverage_percentage": (len(chunk_coverage) / self.manifest["metadata"]["total_vectors"]) * 100
+        }
+
     def cleanup(self):
         """Clean up resources and background threads"""
         # Cancel any pending prefetch operations
         for future in self.prefetch_futures.values():
+            future.cancel()
+
+        for future in self.kg_prefetch_futures.values():
             future.cancel()
 
         # Shutdown executor
@@ -746,8 +1139,9 @@ class CDNVectorMP4Decoder:
 # Convenience functions for common use cases
 def create_cached_decoder(mp4_path: str,
                           cache_dir: Optional[str] = None,
+                          enable_kg: bool = True,
                           **kwargs) -> CDNVectorMP4Decoder:
-    """Create a cached decoder with reasonable defaults"""
+    """Create a cached decoder with reasonable defaults and KG support"""
     if cache_dir is None:
         cache_dir = tempfile.mkdtemp(prefix="vector_cache_")
 
@@ -756,6 +1150,7 @@ def create_cached_decoder(mp4_path: str,
         disk_cache_dir=cache_dir,
         cache_size=100,
         enable_prefetching=True,
+        enable_kg=enable_kg,
         **kwargs
     )
 
@@ -763,8 +1158,9 @@ def create_cached_decoder(mp4_path: str,
 def create_cdn_decoder(base_url: str,
                        filename_prefix: str,
                        cache_dir: Optional[str] = None,
+                       enable_kg: bool = True,
                        **kwargs) -> CDNVectorMP4Decoder:
-    """Create a decoder specifically for CDN-hosted files"""
+    """Create a decoder specifically for CDN-hosted files with KG support"""
     mp4_url = f"{base_url}/{filename_prefix}.mp4"
     manifest_url = f"{base_url}/{filename_prefix}_manifest.json"
     faiss_url = f"{base_url}/{filename_prefix}_faiss.index"
@@ -774,5 +1170,6 @@ def create_cdn_decoder(base_url: str,
         manifest_path=manifest_url,
         faiss_path=faiss_url,
         cache_dir=cache_dir,
+        enable_kg=enable_kg,
         **kwargs
     )
