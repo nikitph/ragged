@@ -132,8 +132,8 @@ ragged/
 ### 🎯 Current Focus (v0.1)
 - [x] Core MP4 encoding/decoding
 - [x] CDN-optimized distribution
-- [x] FastAPI web service
-- [x] PDF upload pipeline
+- [ ] FastAPI web service
+- [ ] PDF upload pipeline
 - [ ] Production deployment guides
 - [ ] Performance optimization
 
