@@ -75,51 +75,34 @@ class TextVectorPipeline:
         return None
 
     def chunk_text(self, text: str, source: str = "unknown") -> List[TextChunk]:
-        """Split text into overlapping chunks based on token count"""
-        sentences = re.split(r'(?<=[.!?])\s+', text)
+        """Pure sentence chunking - 4 sentences per chunk, no token limits"""
+        sentences = re.split(r'[.!?]+\s+(?=[A-Z])', text)
 
         chunks = []
-        current_chunk = ""
-        current_tokens = 0
         chunk_id = 0
+        sentences_per_chunk = 4  # Adjust this number as needed
 
-        for sentence in sentences:
-            sentence_tokens = self._count_tokens(sentence)
+        # Group sentences into chunks
+        for i in range(0, len(sentences), sentences_per_chunk):
+            chunk_sentences = sentences[i:i + sentences_per_chunk]
+            chunk_text = ' '.join(s.strip() for s in chunk_sentences if s.strip())
 
-            if current_tokens + sentence_tokens > self.chunk_size and current_chunk:
+            if chunk_text:
+                # Add period if needed
+                if not chunk_text.endswith(('.', '!', '?')):
+                    chunk_text += '.'
+
                 chunk = TextChunk(
-                    text=current_chunk.strip(),
+                    text=chunk_text,
                     source=source,
                     chunk_id=chunk_id,
-                    topic=self._extract_topic(current_chunk),
-                    word_count=len(current_chunk.split()),
-                    token_count=current_tokens,
+                    topic=self._extract_topic(chunk_text),
+                    word_count=len(chunk_text.split()),
+                    token_count=self._count_tokens(chunk_text),
                     timestamp=datetime.now().isoformat()
                 )
                 chunks.append(chunk)
-
-                overlap_text = self._get_overlap_text(current_chunk, self.chunk_overlap)
-                current_chunk = overlap_text + " " + sentence
-                current_tokens = self._count_tokens(current_chunk)
                 chunk_id += 1
-            else:
-                if current_chunk:
-                    current_chunk += " " + sentence
-                else:
-                    current_chunk = sentence
-                current_tokens += sentence_tokens
-
-        if current_chunk.strip():
-            chunk = TextChunk(
-                text=current_chunk.strip(),
-                source=source,
-                chunk_id=chunk_id,
-                topic=self._extract_topic(current_chunk),
-                word_count=len(current_chunk.split()),
-                token_count=current_tokens,
-                timestamp=datetime.now().isoformat()
-            )
-            chunks.append(chunk)
 
         return chunks
 
@@ -144,10 +127,11 @@ class TextVectorPipeline:
                                     show_progress_bar=True,
                                     convert_to_numpy=True)
 
+        # UPDATED: Store full text, not truncated preview
         metadata = []
         for chunk in chunks:
             meta = {
-                "text": chunk.text[:200] + "..." if len(chunk.text) > 200 else chunk.text,
+                "text": chunk.text,
                 "source": chunk.source,
                 "chunk_id": chunk.chunk_id,
                 "topic": chunk.topic,

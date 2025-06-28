@@ -10,7 +10,7 @@ Usage:
     python model_server.py --start
 
     # Use in your search script
-    python search_wikipedia.py "query" --use-server
+    python search.py "query" --use-server
 """
 
 import argparse

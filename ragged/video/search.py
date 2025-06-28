@@ -333,8 +333,8 @@ class WikipediaSearchEngine:
 
             # Get text content
             text = metadata.get('text', 'No content available')
-            if len(text) > max_text_length and not detailed:
-                text = text[:max_text_length] + "..."
+            # if len(text) > max_text_length and not detailed:
+            #     text = text[:max_text_length] + "..."
 
             # Extract key information
             source = metadata.get('source', 'Unknown source')
