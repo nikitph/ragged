@@ -45,9 +45,13 @@ https://github.com/user-attachments/assets/97ce9c21-bd8f-4599-8d56-672f2282bf50
 
 b. Encode knowledge base -- 
 
+https://github.com/user-attachments/assets/b486261e-bba2-441d-8d49-a1fedc8f347a
+
+c. Query first run  -- 
+
 https://github.com/user-attachments/assets/970b7c01-4da4-449a-b12e-b4c52598c585
 
-c. Run query
+d. Query subsequent runs -- 
 
 https://github.com/user-attachments/assets/d3b25245-407f-4ae2-b96e-8a21205a2f7e
 
@@ -139,9 +143,9 @@ ragged/
 
 ## 📊 Performance Characteristics
 
-============================================================
-📊 BENCHMARK SUMMARY - Obtained by running benchmarks.py against a random dataset
-============================================================
+
+📊 BENCHMARK SUMMARY - Obtained by running benchmarks.py against a random dataset. To be honest i feel while the system is very good, these numbers are a bit generous. Critiques on the benchmark script are welcome. 
+
 ⚡ Performance Grade: A (10.0ms avg)
 🎯 Quality Grade: F (43.3% relevance)
 🚀 Throughput: 100.9 queries/sec
@@ -204,7 +208,7 @@ Welcome
 ## 📚 Learn More
 
 ### 📖 Academic Paper
-Read our arXiv paper: **"Ragged: Leveraging Video Container Formats for Efficient Vector Database Distribution"**
+Read our arXiv paper: **"Ragged: Leveraging Video Container Formats for Efficient Vector Database Distribution"** coming soon
 
 ### 🎥 Inspiration
 This project was inspired by [Memvid](https://github.com/Olow304/memvid), which demonstrated storing data in video formats. Ragged extends this concept with vector-specific optimizations, CDN distribution, and semantic search capabilities.
