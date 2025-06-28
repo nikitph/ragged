@@ -38,6 +38,21 @@ python3 ragged/video/benchmarks.py --benchmark
 - A seperate model server helps a lot with performance. I strongly recommend running that.
 - You might notice that the similarity results are somewhat low. That will be a fair critique but the point of this library and demo is to show the Mp4 storage and cloud retrieval functionality. People way smarter and efficient than myself have solved those problems and with some effort the quality of results can be improved (future enhancement)
 
+## Demo
+a. Run model server -- 
+
+https://github.com/user-attachments/assets/97ce9c21-bd8f-4599-8d56-672f2282bf50
+
+b. Encode knowledge base -- 
+
+https://github.com/user-attachments/assets/970b7c01-4da4-449a-b12e-b4c52598c585
+
+c. Run query
+
+https://github.com/user-attachments/assets/d3b25245-407f-4ae2-b96e-8a21205a2f7e
+
+
+
 ## 🌟 What Makes Ragged Special?
 
 ### Traditional Vector Databases 😰
