@@ -14,8 +14,29 @@ Ragged transforms how we think about vector database distribution by leveraging 
 # Install dependencies
 poetry install
 
-WORK IN PROGRESS: WILL BE UPDATED SHORTLY
+# configure the R2 bucket by creating a .env with the following variables. Any s3-compatible provider should be ok. I have only tested with R2
+R2_BUCKET=ragged
+R2_ENDPOINT=<cloudflare-r2-endpoint>
+R2_ACCESS_KEY=<cloudflare-r2-access-key>
+R2_SECRET_KEY=<cloudflare-r2-secret-key>
+
+# next step is to start the model server. We dont have to but warming the embedding model reduces the processing time
+python3 ragged/video/model_server.py --start
+
+# now lets build the mp4 and other data from wikipedia. This will automtically upload the files to R2
+python3 ragged/video/wiki_upload.py --max-articles 1000 
+
+# Search the knowledge base we just built
+ python3 ragged/video/search.py "machine" --show-performance --detailed
+
+# If you want to run benchmarks
+python3 ragged/video/benchmarks.py --benchmark
 ```
+
+### Caveats
+- First search run will be slow as the faiss index and the manifest will be populated one time from the cloud. Even this can be warmed up (future enhancement)
+- A seperate model server helps a lot with performance. I strongly recommend running that.
+- You might notice that the similarity results are somewhat low. That will be a fair critique but the point of this library and demo is to show the Mp4 storage and cloud retrieval functionality. People way smarter and efficient than myself have solved those problems and with some effort the quality of results can be improved (future enhancement)
 
 ## 🌟 What Makes Ragged Special?
 
@@ -97,21 +118,28 @@ ragged/
 │   ├── 📁 enterprise/            # Enterprise features (WIP)
 │   └── main.py                   # FastAPI app entry point
 ├── 📁 examples/                   # Usage examples
-├── 📁 scripts/                   # Utility scripts
 └── 📋 pyproject.toml             # Dependencies
 ```
 
 
 ## 📊 Performance Characteristics
 
-| Metric | Traditional Vector DB | Ragged |
-|--------|----------------------|--------|
-| 🚀 Cold-start latency | 45+ seconds | ~3 seconds |
-| 💾 Initial memory usage | 2.4GB | 85MB |
-| 🌍 Global distribution | Complex setup | Upload file |
-| 💰 Infrastructure cost | High | CDN bandwidth only |
-| ⚡ Concurrent users | Connection limited | Unlimited |
-| 🔄 Updates | Real-time | File replacement |
+============================================================
+📊 BENCHMARK SUMMARY - Obtained by running benchmarks.py against a random dataset
+============================================================
+⚡ Performance Grade: A (10.0ms avg)
+🎯 Quality Grade: F (43.3% relevance)
+🚀 Throughput: 100.9 queries/sec
+💾 Cache Hit Rate: 100.0%
+
+📈 Detailed Metrics:
+   Cold Start p95: 129ms
+   Warm Search p95: 10ms
+   Query Encoding: 8.0ms
+   Result Diversity: 40.0%
+   Memory Usage: 607.5MB
+
+ps: Quality is highly dependent on the articles that you get from the wiki dataset. This will vary from run to run.
 
 ## 🎯 Use Cases
 
@@ -149,10 +177,9 @@ ragged/
 - [ ] Edge AI processing
 - [ ] Ecosystem integrations
 
-## 🤝 Contributing
+## 🤝 Contributions
 
-I dont expect to maintain this. Please fork and use as your heart desires. 
-
+Welcome
 
 ### 📝 Documentation
 - Update README for new features
