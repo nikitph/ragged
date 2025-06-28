@@ -208,7 +208,8 @@ Welcome
 ## 📚 Learn More
 
 ### 📖 Academic Paper
-Read our arXiv paper: **"Ragged: Leveraging Video Container Formats for Efficient Vector Database Distribution"** coming soon
+Read our arXiv paper: **"Ragged: [ragged.pdf](https://github.com/user-attachments/files/20960240/ragged.pdf)
+Leveraging Video Container Formats for Efficient Vector Database Distribution"** 
 
 ### 🎥 Inspiration
 This project was inspired by [Memvid](https://github.com/Olow304/memvid), which demonstrated storing data in video formats. Ragged extends this concept with vector-specific optimizations, CDN distribution, and semantic search capabilities.
