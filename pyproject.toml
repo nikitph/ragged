@@ -22,7 +22,7 @@ sentence-transformers = "^4.1.0"
 numpy = "^1.26.4"
 faiss-cpu = "^1.7.4"
 tqdm = "^4.67.1"
-Pillow = "^11.2.1"
+Pillow = "^11.3.0"
 
 # TODO: Add full dependencies as needed
 # alembic = "^1.12.0"
